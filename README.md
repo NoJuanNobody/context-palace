@@ -22,13 +22,28 @@ Resolves [NoJuanNobody/gemini-activity-harvester#3](https://github.com/NoJuanNob
 
 ![Context Palace v2 TUI](docs/screenshots/tui_v2.png)
 
-The v2 TUI follows the Context Palace mint/ink design: WINDOWS (model context gauges), LAKE (counts, ingest
-sparkline, dedup watermarks), GRAPH (pinned-first 1-hop tree) and AUDIT (consensus events + last capsule), with
-a `[c][r][u][d][p][m][t][q]` status bar. Preview it on synthetic data without touching your real lake:
+The v2 TUI follows the Context Palace mint/ink design (sage `#e8efe6`, ink `#1c1c1c`, hairline rounded panes):
+
+- **WINDOWS**: per-agent model context gauges (used / max, utilization, headroom, adaptive capsule budget, HEALTHY / COMPACT NOW).
+- **LAKE**: concept / pinned / edge / conflict counts, tier distribution (hot / warm / cold / superseded), belief-revision
+  ingest sparkline, dedup watermarks per session, and the consensus provenance order.
+- **GRAPH**: pinned-first 1-hop tree with confidence, PINNED and provenance.
+- **AUDIT**: ConflictResolutionEvents, the last pushed capsule, and the **conversational engine**: `[a] Ask` sends a turn
+  to `ConversationalMemoryPalace` (questions, `remember X is Y`, `forget X`, time-travel) and the answer + cited
+  concepts land here.
+- **Status bar**: `[c] Create [r] Read [u] Update [d] Delete [l] List All [a] Ask [p] Pin & Inject [m] Models [t] Time-Travel [q] Quit`.
+
+`[l] List All` opens the full, untruncated lake inventory (same `LakeInventoryExporter` report as `context-palace list-all`)
+as a scrollable view; `esc` returns to the palace:
+
+![Context Palace v2 List All](docs/screenshots/tui_v2_list_all.png)
+
+Preview it on synthetic data without touching your real lake:
 
 ```bash
 python scripts/seed_demo_lake.py /tmp/cp_demo.db
 context-palace --db /tmp/cp_demo.db tui
+python scripts/render_tui_screenshot.py out/tui.svg --png out/tui.png            # [--list-all] for the inventory view
 ```
 
 ## Installation & Quickstart

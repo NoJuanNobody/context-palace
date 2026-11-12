@@ -28,7 +28,234 @@ from context_palace.models import (
     compute_text_embedding,
     estimate_tokens,
 )
-from context_palace.tui import MemoryPalaceTUI, _call_compatible
+from context_palace.tui import MemoryPalaceTUI, _call_compatible, _synthesize_chat_turn
+
+# Optional imports from inventory and conversation with graceful fallback
+try:
+    from context_palace.inventory import (  # type: ignore
+        LakeInventoryExporter,
+        list_everything,
+        render_list_all_report,
+    )
+except (ImportError, ValueError):
+    try:
+        from .inventory import (  # type: ignore
+            LakeInventoryExporter,
+            list_everything,
+            render_list_all_report,
+        )
+    except (ImportError, ValueError):
+        LakeInventoryExporter = None
+        list_everything = None
+        render_list_all_report = None
+
+try:
+    from context_palace.conversation import ConversationalMemoryPalace  # type: ignore
+except (ImportError, ValueError):
+    try:
+        from .conversation import ConversationalMemoryPalace  # type: ignore
+    except (ImportError, ValueError):
+        ConversationalMemoryPalace = None
+
+
+class _FallbackInventoryExporter:
+    """Fallback inventory exporter when inventory.py is not yet merged."""
+
+    def __init__(self, lake: Any, registry: Optional[Any] = None) -> None:
+        self.lake = lake
+        self.registry = registry
+
+    def export_inventory(
+        self,
+        active_only: bool = False,
+        agent_id: Optional[str] = None,
+        concept_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        include_tombstoned = not active_only
+        nodes = (
+            self.lake.list_concepts(include_tombstoned=include_tombstoned)
+            if hasattr(self.lake, "list_concepts")
+            else []
+        )
+        if concept_type:
+            nodes = [n for n in nodes if getattr(n, "category", "") == concept_type]
+        if agent_id:
+            nodes = [n for n in nodes if getattr(n, "source_agent_id", "") == agent_id]
+
+        edges = (
+            self.lake.list_edges(active_only=active_only)
+            if hasattr(self.lake, "list_edges")
+            else []
+        )
+        if agent_id:
+            edges = [e for e in edges if getattr(e, "source_agent_id", "") == agent_id]
+
+        sessions = (
+            self.lake.list_agent_sessions()
+            if hasattr(self.lake, "list_agent_sessions")
+            else []
+        )
+        if agent_id:
+            sessions = [s for s in sessions if getattr(s, "agent_id", "") == agent_id]
+
+        watermarks = [
+            {
+                "agent_id": s.agent_id,
+                "last_byte_offset": s.last_byte_offset,
+                "last_processed_turn": s.last_processed_turn,
+                "transcript_path": s.transcript_path,
+                "updated_at": s.updated_at,
+            }
+            for s in sessions
+        ]
+
+        models = [
+            {
+                "model_id": s.model_id,
+                "harness_type": s.harness_type,
+                "max_context_tokens": s.max_context_tokens,
+                "used_tokens": s.used_tokens,
+            }
+            for s in sessions
+        ]
+
+        return {
+            "memory_nodes": [n.to_dict() if hasattr(n, "to_dict") else n for n in nodes],
+            "memory_edges": [e.to_dict() if hasattr(e, "to_dict") else e for e in edges],
+            "agent_sessions": [s.to_dict() if hasattr(s, "to_dict") else s for s in sessions],
+            "extraction_watermarks": watermarks,
+            "model_registry": models,
+            "counts": {
+                "memory_nodes": len(nodes),
+                "memory_edges": len(edges),
+                "agent_sessions": len(sessions),
+                "extraction_watermarks": len(watermarks),
+                "model_registry": len(models),
+            },
+        }
+
+
+def _fallback_render_list_all_report(inventory: Dict[str, Any], fmt: str = "rich") -> str:
+    if fmt == "json":
+        return json.dumps(inventory, indent=2)
+
+    if fmt == "markdown":
+        lines = [
+            "# Context Palace Complete Lake Inventory",
+            "",
+            f"**Total Records:** {inventory['counts']['memory_nodes']} nodes, "
+            f"{inventory['counts']['memory_edges']} edges, "
+            f"{inventory['counts']['agent_sessions']} sessions, "
+            f"{inventory['counts']['extraction_watermarks']} watermarks",
+            "",
+            "## 1. Concept Nodes (`memory_nodes`)",
+            "| Node ID | Canonical Name | Category | Active Value | Confidence | Pinned | Agent |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for n in inventory.get("memory_nodes", []):
+            lines.append(
+                f"| {n.get('node_id', '')} | {n.get('canonical_name', '')} | {n.get('category', '')} | "
+                f"{str(n.get('active_value', ''))[:40]} | {n.get('confidence', '')} | {n.get('pinned', '')} | {n.get('source_agent_id', '')} |"
+            )
+        lines.extend([
+            "",
+            "## 2. Relation Edges (`memory_edges`)",
+            "| Edge ID | Source ID | Target ID | Relation Type | Weight | Agent |",
+            "|---|---|---|---|---|---|",
+        ])
+        for e in inventory.get("memory_edges", []):
+            lines.append(
+                f"| {e.get('edge_id', '')} | {e.get('source_id', '')} | {e.get('target_id', '')} | "
+                f"{e.get('relation_type', '')} | {e.get('weight', '')} | {e.get('source_agent_id', '')} |"
+            )
+        lines.extend([
+            "",
+            "## 3. Agent Sessions (`agent_sessions`)",
+            "| Agent ID | Harness | Model | Used Tokens | Max Tokens |",
+            "|---|---|---|---|---|",
+        ])
+        for s in inventory.get("agent_sessions", []):
+            lines.append(
+                f"| {s.get('agent_id', '')} | {s.get('harness_type', '')} | {s.get('model_id', '')} | "
+                f"{s.get('used_tokens', 0):,} | {s.get('max_context_tokens', 0):,} |"
+            )
+        lines.extend([
+            "",
+            "## 4. Extraction Watermarks (`extraction_watermarks`)",
+            "| Agent ID | Offset (Bytes) | Processed Turn | Transcript Path |",
+            "|---|---|---|---|",
+        ])
+        for w in inventory.get("extraction_watermarks", []):
+            lines.append(
+                f"| {w.get('agent_id', '')} | {w.get('last_byte_offset', 0):,} | {w.get('last_processed_turn', 0)} | "
+                f"{w.get('transcript_path', '-')} |"
+            )
+        lines.extend([
+            "",
+            "## 5. Model Registry (`model_registry`)",
+            "| Model ID | Max Context Tokens | Harness |",
+            "|---|---|---|",
+        ])
+        for m in inventory.get("model_registry", []):
+            lines.append(f"| {m.get('model_id', '')} | {m.get('max_context_tokens', 0):,} | {m.get('harness_type', '-')} |")
+        return "\n".join(lines)
+
+    # Format: rich / ASCII
+    lines = [
+        "================================================================================",
+        "CONTEXT PALACE — FULL UNTRUNCATED LAKE INVENTORY (5 TABLES)",
+        "================================================================================",
+        f"Inventory Counts: {inventory['counts']['memory_nodes']} nodes, "
+        f"{inventory['counts']['memory_edges']} edges, "
+        f"{inventory['counts']['agent_sessions']} sessions, "
+        f"{inventory['counts']['extraction_watermarks']} watermarks, "
+        f"{inventory['counts']['model_registry']} models",
+        "",
+        "--- [Table 1: Memory Nodes / Concepts] ---",
+    ]
+    for n in inventory.get("memory_nodes", []):
+        pin = "[PINNED]" if n.get("pinned") else ""
+        lines.append(
+            f"• {n.get('canonical_name')} [{str(n.get('node_id'))[:8]}] ({n.get('category')}, conf={float(n.get('confidence', 0.9)):.2f}) {pin}: "
+            f"{n.get('active_value')}"
+        )
+    if not inventory.get("memory_nodes"):
+        lines.append("  (0 concept nodes)")
+
+    lines.extend(["", "--- [Table 2: Relation Edges] ---"])
+    for e in inventory.get("memory_edges", []):
+        lines.append(
+            f"• {e.get('source_id')} ──[{e.get('relation_type')}]──► {e.get('target_id')} "
+            f"(weight={float(e.get('weight', 1.0)):.2f}, via {e.get('source_agent_id')})"
+        )
+    if not inventory.get("memory_edges"):
+        lines.append("  (0 relation edges)")
+
+    lines.extend(["", "--- [Table 3: Agent Sessions] ---"])
+    for s in inventory.get("agent_sessions", []):
+        lines.append(
+            f"• {s.get('agent_id')} ({s.get('harness_type')} / {s.get('model_id')}): "
+            f"{s.get('used_tokens', 0):,} / {s.get('max_context_tokens', 0):,} tokens"
+        )
+    if not inventory.get("agent_sessions"):
+        lines.append("  (0 agent sessions)")
+
+    lines.extend(["", "--- [Table 4: Extraction Watermarks] ---"])
+    for w in inventory.get("extraction_watermarks", []):
+        lines.append(
+            f"• {w.get('agent_id')}: offset={w.get('last_byte_offset', 0):,} bytes, turn={w.get('last_processed_turn', 0)}"
+        )
+    if not inventory.get("extraction_watermarks"):
+        lines.append("  (0 extraction watermarks)")
+
+    lines.extend(["", "--- [Table 5: Model Registry] ---"])
+    for m in inventory.get("model_registry", []):
+        lines.append(f"• {m.get('model_id')}: max_tokens={m.get('max_context_tokens', 0):,}")
+    if not inventory.get("model_registry"):
+        lines.append("  (0 models registered)")
+
+    lines.append("================================================================================")
+    return "\n".join(lines)
 
 
 class _FallbackSQLiteContextLake:
@@ -698,7 +925,7 @@ def _load_components(db_path: str) -> Dict[str, Any]:
         consensus = None
 
     try:
-        from context_palace.retriever import DualDirectionRetriever  # type: ignore
+        from context_palace.retrieval import DualDirectionRetriever  # type: ignore
         retriever = _call_compatible(DualDirectionRetriever, lake=lake, registry=registry)
     except Exception:
         retriever = _FallbackRetriever(lake=lake, registry=registry)
@@ -837,6 +1064,66 @@ def build_parser() -> argparse.ArgumentParser:
         "--config-root",
         default=str(Path("~/.gemini/config").expanduser()),
         help="Target Antigravity config directory (default: ~/.gemini/config)",
+    )
+
+    # 10. list-all (alias ls)
+    p_list_all = subparsers.add_parser(
+        "list-all",
+        aliases=["ls"],
+        help="Output complete untruncated inventory of all 5 tables in Context Lake",
+    )
+    p_list_all.add_argument(
+        "--format",
+        choices=["rich", "json", "markdown"],
+        default="rich",
+        help="Output format (rich, json, markdown)",
+    )
+    p_list_all.add_argument(
+        "--active-only",
+        action="store_true",
+        help="Exclude superseded/tombstoned revisions and nodes",
+    )
+    p_list_all.add_argument("--agent", default=None, help="Filter by source agent ID")
+    p_list_all.add_argument("--type", default=None, help="Filter concepts by category")
+
+    # 11. chat (aliases converse, ask)
+    p_chat = subparsers.add_parser(
+        "chat",
+        aliases=["converse", "ask"],
+        help="Conversational Memory Palace natural-language query and REPL",
+    )
+    p_chat.add_argument(
+        "message",
+        nargs="*",
+        default=None,
+        help="Natural language question, instruction, or CRUD statement",
+    )
+    p_chat.add_argument(
+        "--as-of",
+        type=float,
+        default=None,
+        help="Historical timestamp for bitemporal point-in-time belief query",
+    )
+    p_chat.add_argument(
+        "--top-k",
+        type=int,
+        default=8,
+        help="Top-K seed concepts to retrieve",
+    )
+    p_chat.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON structured answer and cited nodes",
+    )
+    p_chat.add_argument(
+        "--agent",
+        default="context-palace-chat",
+        help="Agent session identifier",
+    )
+    p_chat.add_argument(
+        "--model",
+        default="gemini-2.5-pro",
+        help="Model identifier",
     )
 
     return parser
@@ -1254,11 +1541,140 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "context_forget",
                         "context_time_travel",
                         "context_window_status",
+                        "context_list_all",
+                        "context_chat",
                     ],
                 },
                 indent=2,
             )
         )
+        return 0
+
+    if sub in ("list-all", "ls"):
+        fmt = getattr(args, "format", "rich")
+        active_only = bool(getattr(args, "active_only", False))
+        agent_filter = getattr(args, "agent", None)
+        type_filter = getattr(args, "type", None)
+
+        if LakeInventoryExporter is not None and render_list_all_report is not None:
+            try:
+                exporter = LakeInventoryExporter(lake=lake, registry=registry)
+                inv = exporter.export_inventory(
+                    active_only=active_only,
+                    agent_id=agent_filter,
+                    concept_type=type_filter,
+                )
+                report = render_list_all_report(inv, format=fmt)
+                print(report)
+                return 0
+            except Exception:
+                pass
+
+        # Built-in fallback
+        exporter = _FallbackInventoryExporter(lake=lake, registry=registry)
+        inv = exporter.export_inventory(
+            active_only=active_only,
+            agent_id=agent_filter,
+            concept_type=type_filter,
+        )
+        report = _fallback_render_list_all_report(inv, fmt=fmt)
+        print(report)
+        return 0
+
+    if sub in ("chat", "converse", "ask"):
+        msg_parts = getattr(args, "message", []) or []
+        msg_text = " ".join(msg_parts).strip()
+        as_of = getattr(args, "as_of", None)
+        top_k = int(getattr(args, "top_k", 8))
+        json_mode = bool(getattr(args, "json", False))
+        agent_id = getattr(args, "agent", "context-palace-chat")
+        model_id = getattr(args, "model", "gemini-2.5-pro")
+
+        if msg_text:
+            answer = ""
+            cited_nodes: List[str] = []
+            intent = "query"
+
+            if ConversationalMemoryPalace is not None:
+                try:
+                    engine = _call_compatible(
+                        ConversationalMemoryPalace,
+                        lake=lake,
+                        retriever=retriever,
+                        registry=registry,
+                        default_agent_id=agent_id,
+                        default_model_id=model_id,
+                    )
+                    turn = engine.ask(msg_text, as_of=as_of, top_k=top_k)
+                    answer = getattr(turn, "answer", str(turn.get("answer", "")))
+                    raw_cited = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
+                    cited_nodes = [
+                        str(c.get("canonical_name") or c.get("node_id") or "")
+                        if isinstance(c, dict)
+                        else str(c)
+                        for c in raw_cited
+                    ]
+                    raw_intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                    intent = "create" if raw_intent == "remember" else ("delete" if raw_intent == "forget" else raw_intent)
+                except Exception:
+                    turn = _synthesize_chat_turn(lake, retriever, msg_text, as_of=as_of, top_k=top_k)
+                    answer = turn["answer"]
+                    cited_nodes = turn["cited_nodes"]
+                    intent = turn["intent"]
+            else:
+                turn = _synthesize_chat_turn(lake, retriever, msg_text, as_of=as_of, top_k=top_k)
+                answer = turn["answer"]
+                cited_nodes = turn["cited_nodes"]
+                intent = turn["intent"]
+
+            if json_mode:
+                print(
+                    json.dumps(
+                        {
+                            "status": "ok",
+                            "query": msg_text,
+                            "answer": answer,
+                            "intent": intent,
+                            "cited_nodes": cited_nodes,
+                            "as_of": as_of,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"Palace: {answer}")
+                if cited_nodes:
+                    print(f"(Cited concepts: {', '.join(cited_nodes)})")
+            return 0
+
+        # Multi-turn interactive REPL
+        if ConversationalMemoryPalace is not None and hasattr(ConversationalMemoryPalace, "run_repl"):
+            try:
+                engine = _call_compatible(
+                    ConversationalMemoryPalace,
+                    lake=lake,
+                    retriever=retriever,
+                    registry=registry,
+                    default_agent_id=agent_id,
+                    default_model_id=model_id,
+                )
+                engine.run_repl()
+                return 0
+            except Exception:
+                pass
+
+        print("Context Palace Conversational REPL (type 'exit' or 'quit' to exit)")
+        while True:
+            try:
+                line = input("palace> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not line or line.lower() in ("exit", "quit", "q"):
+                break
+            res = _synthesize_chat_turn(lake, retriever, line, as_of=as_of, top_k=top_k)
+            print(f"Palace: {res['answer']}")
+            if res.get("cited_nodes"):
+                print(f"  └─► cited: {', '.join(res['cited_nodes'])}")
         return 0
 
     return 0

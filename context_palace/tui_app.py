@@ -113,6 +113,82 @@ class PromptScreen(ModalScreen[Optional[Dict[str, str]]]):
         self.dismiss(None)
 
 
+class InventoryScreen(ModalScreen[None]):
+    """Full-screen, scrollable, untruncated lake inventory ([l] List All)."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", show=False),
+        Binding("q", "close", "Close", show=False),
+        Binding("l", "close", "Close", show=False),
+    ]
+
+    DEFAULT_CSS = f"""
+    InventoryScreen {{
+        background: {BG};
+        padding: 1 2;
+    }}
+    InventoryScreen > VerticalScroll {{
+        background: {BG};
+        color: {INK};
+        border: round {INK};
+        padding: 0 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: {INK_45};
+        scrollbar-color-hover: {INK};
+        scrollbar-color-active: {INK};
+        scrollbar-background: {BG};
+        scrollbar-background-hover: {BG};
+        scrollbar-background-active: {BG};
+    }}
+    InventoryScreen Static {{
+        background: {BG};
+        color: {INK};
+    }}
+    InventoryScreen .inv-title {{
+        text-style: bold;
+    }}
+    InventoryScreen .inv-hint {{
+        color: {INK_45};
+    }}
+    """
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self.title_text = title
+        self.body = body
+
+    def compose(self) -> ComposeResult:
+        from rich.text import Text
+
+        with VerticalScroll(id="inventory"):
+            yield Static("LIST ALL  ·  " + self.title_text, classes="inv-title")
+            yield Static("esc / q / l = back to the palace", classes="inv-hint")
+            yield Static(Text(self.body), id="inventory-body")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+def build_inventory_report(tui: Any) -> Tuple[str, str]:
+    """Full untruncated inventory via inventory.LakeInventoryExporter (same as `context-palace list-all`)."""
+    import contextlib
+    import io
+
+    from context_palace import tui as tui_module
+
+    if tui_module.list_everything is None or tui_module.render_list_all_report is None:
+        return ("inventory unavailable", "context_palace.inventory could not be imported")
+    with contextlib.redirect_stdout(io.StringIO()):
+        inventory = tui_module.list_everything(tui.lake)
+        report = tui_module.render_list_all_report(inventory, format="rich")
+    summary = inventory.get("summary", {}) if isinstance(inventory, dict) else {}
+    title = (
+        f"{summary.get('total_nodes', 0):,} nodes · {summary.get('total_edges', 0):,} edges · "
+        f"{summary.get('total_sessions', 0):,} sessions · {summary.get('registered_models', 0):,} models"
+    )
+    return title, report
+
+
 class ContextPalaceApp(App[None]):
     """Textual Memory Palace control plane."""
 
@@ -194,6 +270,8 @@ class ContextPalaceApp(App[None]):
         Binding("r", "read", "Read"),
         Binding("u", "update", "Update"),
         Binding("d", "delete", "Delete"),
+        Binding("l", "list_all", "List All"),
+        Binding("a", "ask", "Ask"),
         Binding("p", "pin_inject", "Pin & Inject"),
         Binding("m", "models", "Models"),
         Binding("t", "time_travel", "Time-Travel"),
@@ -368,6 +446,39 @@ class ContextPalaceApp(App[None]):
             [("target", "Concept to pin (blank = none)", ""), ("agent", "Target agent id", self._worst_agent()), ("query", "Task query", "")],
             submit,
             hint="builds context_inject_capsule within the agent's adaptive budget",
+        )
+
+    def action_list_all(self) -> None:
+        try:
+            self.tui.handle_command("l")
+            title, report = build_inventory_report(self.tui)
+        except Exception as exc:
+            self.tui.status_message = f"Error: {exc}"
+            self.refresh_panes()
+            return
+        self.refresh_panes()
+        self.push_screen(InventoryScreen(title, report))
+
+    def action_ask(self) -> None:
+        def submit(v: Dict[str, str]) -> None:
+            message = v.get("message", "").strip()
+            if not message:
+                self.tui.status_message = "Ask needs a message"
+                self.refresh_panes()
+                return
+            try:
+                self.tui.handle_command(f"a {message}")
+                self.tui.last_output = []
+            except Exception as exc:
+                self.tui.status_message = f"Error: {exc}"
+            self.refresh_panes()
+            self.query_one("#pane-audit", VerticalScroll).scroll_end(animate=False)
+
+        self._prompt(
+            "[a] Ask the palace",
+            [("message", "Message", "")],
+            submit,
+            hint="questions query the lake · 'remember X is Y' / 'forget X' edit it · answers land in AUDIT",
         )
 
     def action_models(self) -> None:

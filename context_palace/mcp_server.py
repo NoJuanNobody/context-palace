@@ -37,9 +37,9 @@ class ContextPalaceMCPServer:
         self.retriever = retriever or DualDirectionRetriever(lake)
         self.registry = registry
 
-    def list_tools(self) -> List[Dict[str, Any]]:
-        """Return MCP tool definitions with JSON schemas for all 6 Context Palace tools."""
-        return [
+    def list_tools(self, include_v2: bool = False) -> List[Dict[str, Any]]:
+        """Return MCP tool definitions with JSON schemas for Context Palace tools."""
+        tools = [
             {
                 "name": "context_query",
                 "description": (
@@ -190,6 +190,71 @@ class ContextPalaceMCPServer:
                 },
             },
         ]
+        if include_v2:
+            tools.extend(
+                [
+                    {
+                        "name": "context_list_all",
+                        "description": (
+                            "Return the complete untruncated inventory across all 5 tables: "
+                            "memory_nodes, memory_edges, agent_sessions, extraction_watermarks, model_registry."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "active_only": {
+                                    "type": "boolean",
+                                    "description": "If true, exclude tombstoned nodes and inactive edges.",
+                                    "default": False,
+                                },
+                                "agent_id": {
+                                    "type": ["string", "null"],
+                                    "description": "Optional filter by source agent ID.",
+                                },
+                                "category": {
+                                    "type": ["string", "null"],
+                                    "description": "Optional filter by concept category.",
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "name": "context_chat",
+                        "description": (
+                            "Execute a natural-language conversational query or memory command against the "
+                            "Federated Context Lake and return the grounded answer, intent, and cited nodes."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "Natural-language query, question, or CRUD instruction.",
+                                },
+                                "as_of": {
+                                    "type": ["number", "null"],
+                                    "description": "Optional historical Unix timestamp for bitemporal point-in-time query.",
+                                },
+                                "top_k": {
+                                    "type": "integer",
+                                    "description": "Maximum number of seed concepts to retrieve.",
+                                    "default": 8,
+                                },
+                            },
+                            "required": ["message"],
+                        },
+                    },
+                ]
+            )
+        return tools
+
+    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+        """Return MCP tool definitions with JSON schemas for all Context Palace tools including v2."""
+        return self.list_tools(include_v2=True)
+
+    def _dispatch_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch an MCP tool execution (alias for call_tool)."""
+        return self.call_tool(name, arguments)
 
     def _resolve_session(self, agent_id: str) -> AgentSession:
         # 1. Try lake.get_session / get_agent_session
@@ -444,6 +509,117 @@ class ContextPalaceMCPServer:
                 "session_count": len(session_dicts),
                 "sessions": session_dicts,
                 "compaction_alerts": compaction_alerts,
+            }
+
+        if name == "context_list_all":
+            active_only = bool(args.get("active_only", False))
+            agent_id = args.get("agent_id")
+            category = args.get("category")
+
+            nodes = (
+                self.lake.list_concepts(include_tombstoned=not active_only)
+                if hasattr(self.lake, "list_concepts")
+                else []
+            )
+            if category:
+                nodes = [n for n in nodes if getattr(n, "category", "") == category]
+            if agent_id:
+                nodes = [n for n in nodes if getattr(n, "source_agent_id", "") == agent_id]
+
+            edges = (
+                self.lake.list_edges(active_only=active_only)
+                if hasattr(self.lake, "list_edges")
+                else []
+            )
+            if agent_id:
+                edges = [e for e in edges if getattr(e, "source_agent_id", "") == agent_id]
+
+            sessions = (
+                self.lake.list_agent_sessions()
+                if hasattr(self.lake, "list_agent_sessions")
+                else []
+            )
+            if agent_id:
+                sessions = [s for s in sessions if getattr(s, "agent_id", "") == agent_id]
+
+            watermarks = [
+                {
+                    "agent_id": s.agent_id,
+                    "last_byte_offset": s.last_byte_offset,
+                    "last_processed_turn": s.last_processed_turn,
+                    "transcript_path": s.transcript_path,
+                    "updated_at": s.updated_at,
+                }
+                for s in sessions
+            ]
+
+            models = [
+                {
+                    "model_id": s.model_id,
+                    "harness_type": s.harness_type,
+                    "max_context_tokens": s.max_context_tokens,
+                    "used_tokens": s.used_tokens,
+                }
+                for s in sessions
+            ]
+
+            return {
+                "status": "ok",
+                "memory_nodes": [n.to_dict() if hasattr(n, "to_dict") else n for n in nodes],
+                "memory_edges": [e.to_dict() if hasattr(e, "to_dict") else e for e in edges],
+                "agent_sessions": [s.to_dict() if hasattr(s, "to_dict") else s for s in sessions],
+                "extraction_watermarks": watermarks,
+                "model_registry": models,
+                "counts": {
+                    "memory_nodes": len(nodes),
+                    "memory_edges": len(edges),
+                    "agent_sessions": len(sessions),
+                    "extraction_watermarks": len(watermarks),
+                    "model_registry": len(models),
+                },
+            }
+
+        if name == "context_chat":
+            message = str(args.get("message", ""))
+            as_of = float(args["as_of"]) if args.get("as_of") is not None else None
+            top_k = int(args.get("top_k", 8))
+
+            answer = ""
+            cited_nodes: List[str] = []
+            intent = "query"
+
+            try:
+                from context_palace.conversation import ConversationalMemoryPalace  # type: ignore
+                conv = ConversationalMemoryPalace(
+                    lake=self.lake, retriever=self.retriever, registry=self.registry
+                )
+                turn = conv.ask(message, as_of=as_of, top_k=top_k)
+                answer = getattr(turn, "answer", str(turn.get("answer", "")))
+                raw_cited = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
+                cited_nodes = [
+                    str(c.get("canonical_name") or c.get("node_id") or "")
+                    if isinstance(c, dict)
+                    else str(c)
+                    for c in raw_cited
+                ]
+                raw_intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                intent = "create" if raw_intent == "remember" else ("delete" if raw_intent == "forget" else raw_intent)
+            except Exception:
+                from context_palace.tui import _synthesize_chat_turn
+                turn = _synthesize_chat_turn(
+                    self.lake, self.retriever, message, as_of=as_of, top_k=top_k
+                )
+                answer = turn["answer"]
+                cited_nodes = turn["cited_nodes"]
+                intent = turn["intent"]
+
+            return {
+                "status": "ok",
+                "message": message,
+                "answer": answer,
+                "intent": intent,
+                "cited_nodes": cited_nodes,
+                "as_of": as_of,
             }
 
         raise ValueError(f"Unknown MCP tool: {name}")

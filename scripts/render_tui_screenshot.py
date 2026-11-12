@@ -21,7 +21,7 @@ from context_palace.tui_app import ContextPalaceApp  # noqa: E402
 from seed_demo_lake import seed  # noqa: E402
 
 
-async def _render(db: str, cols: int, rows: int, push_capsule: bool) -> str:
+async def _render(db: str, cols: int, rows: int, push_capsule: bool, chat: str = "", list_all: bool = False) -> str:
     comps = _load_components(db)
     tui = comps["tui"]
     if push_capsule:
@@ -29,9 +29,15 @@ async def _render(db: str, cols: int, rows: int, push_capsule: bool) -> str:
                                      "query": "auth", "sidecar_path": os.path.join(os.path.dirname(db), ".context_capsule.md")})
         tui.last_output = []
         tui.status_message = "Ready"
+    if chat:
+        tui.handle_command(f"a {chat}")
+        tui.status_message = "Ready"
     app = ContextPalaceApp(tui, refresh_seconds=0)
     async with app.run_test(size=(cols, rows)) as pilot:
         await pilot.pause()
+        if list_all:
+            await pilot.press("l")
+            await pilot.pause()
         return app.export_screenshot(title="Context Palace — context-palace tui")
 
 
@@ -42,11 +48,14 @@ def main() -> None:
     ap.add_argument("--cols", type=int, default=200)
     ap.add_argument("--rows", type=int, default=52)
     ap.add_argument("--no-capsule", action="store_true")
+    ap.add_argument("--chat", default="What do my agents know about auth_strategy?",
+                    help="[a] Ask turn to show in AUDIT ('' for none)")
+    ap.add_argument("--list-all", action="store_true", help="capture the [l] List All inventory view")
     args = ap.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
         db = os.path.join(tmp, "context_lake.db")
         seed(db)
-        svg = asyncio.run(_render(db, args.cols, args.rows, not args.no_capsule))
+        svg = asyncio.run(_render(db, args.cols, args.rows, not args.no_capsule, args.chat, args.list_all))
     os.makedirs(os.path.dirname(os.path.abspath(args.svg)), exist_ok=True)
     with open(args.svg, "w", encoding="utf-8") as fh:
         fh.write(svg)

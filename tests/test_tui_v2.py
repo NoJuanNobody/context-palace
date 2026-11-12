@@ -254,3 +254,54 @@ def test_textual_screenshot_svg(demo: dict, monkeypatch: pytest.MonkeyPatch) -> 
         assert "#e8efe6" in svg.lower()  # sage background token survives into the render
 
     _run_app(demo, scenario)
+
+
+def test_textual_ask_hotkey_runs_conversation_turn_into_audit(demo: dict) -> None:
+    tui = demo["tui"]
+    lake = demo["lake"]
+
+    async def scenario(app: ContextPalaceApp, pilot: Any) -> None:
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, PromptScreen)
+        await pilot.press(*"What is the auth_strategy?", "enter")
+        await pilot.pause()
+        assert len(tui.chat_history) == 1
+        audit = _static_text(app, "audit")
+        assert "You:    What is the auth_strategy?" in audit
+        assert "Palace: " in audit
+
+        # Natural-language CRUD through the same hotkey
+        await pilot.press("a")
+        await pilot.press(*"Remember api_port is 9000", "enter")
+        await pilot.pause()
+        node = lake.get_concept("api_port")
+        assert node is not None and node.active_value == "9000"
+        assert len(tui.chat_history) == 2
+
+    _run_app(demo, scenario)
+
+
+def test_textual_list_all_hotkey_opens_untruncated_inventory(demo: dict) -> None:
+    from context_palace.tui_app import InventoryScreen
+
+    tui = demo["tui"]
+
+    async def scenario(app: ContextPalaceApp, pilot: Any) -> None:
+        await pilot.press("l")
+        await pilot.pause()
+        assert isinstance(app.screen, InventoryScreen)
+        assert "Lake Inventory" in app.screen.body
+        assert "Listed all" in tui.status_message
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, InventoryScreen)
+        assert "palace$ l" in _static_text(app, "audit")
+
+    _run_app(demo, scenario)
+
+
+def test_status_bar_lists_chat_and_list_all_keys(demo: dict) -> None:
+    out = demo["tui"].render_dashboard(width=200)
+    for key in ("c", "r", "u", "d", "l", "a", "p", "m", "t", "q"):
+        assert f"[{key}]" in out

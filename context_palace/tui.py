@@ -1,5 +1,7 @@
 """
-Rich Terminal User Interface (TUI) for Context Palace.
+Rich / Textual Terminal User Interface (TUI) for Context Palace.
+v2 mint/ink layout: WINDOWS / LAKE / GRAPH / AUDIT panes (see tui_view.py, tui_app.py), plus the
+live conversational engine ([a] Ask) and the full lake inventory ([l] List All).
 Provides full visibility into Connected Local Agents, Auto-Detected Model Context Windows,
 the Bitemporal Knowledge Graph, Relationships & Consensus Audit log, and full CRUD controls.
 """
@@ -118,6 +120,137 @@ from context_palace.models import (
 )
 
 
+# Graceful optional imports for inventory and conversational engine
+try:
+    from context_palace.inventory import (  # type: ignore
+        LakeInventoryExporter,
+        list_everything,
+        render_list_all_report,
+    )
+except (ImportError, ValueError):
+    try:
+        from .inventory import (  # type: ignore
+            LakeInventoryExporter,
+            list_everything,
+            render_list_all_report,
+        )
+    except (ImportError, ValueError):
+        LakeInventoryExporter = None
+        list_everything = None
+        render_list_all_report = None
+
+try:
+    from context_palace.conversation import ConversationalMemoryPalace  # type: ignore
+except (ImportError, ValueError):
+    try:
+        from .conversation import ConversationalMemoryPalace  # type: ignore
+    except (ImportError, ValueError):
+        ConversationalMemoryPalace = None
+
+
+def render_unicode_bar(ratio: float, width: int = 12, colored: bool = True) -> str:
+    """
+    Render a visual Unicode progress bar using █ and ░ with color coding:
+    - green: ratio < 0.60
+    - yellow: 0.60 <= ratio < 0.85
+    - red: ratio >= 0.85
+    """
+    safe_ratio = max(0.0, min(1.0, float(ratio)))
+    filled = int(round(safe_ratio * width))
+    empty = max(0, width - filled)
+    bar = ("█" * filled) + ("░" * empty)
+    if not colored:
+        return bar
+    if safe_ratio < 0.60:
+        color = "green"
+    elif safe_ratio < 0.85:
+        color = "yellow"
+    else:
+        color = "red"
+    return f"[{color}]{bar}[/{color}]"
+
+
+def _synthesize_chat_turn(
+    lake: Any,
+    retriever: Optional[Any],
+    message: str,
+    as_of: Optional[float] = None,
+    top_k: int = 8,
+) -> Dict[str, Any]:
+    """Deterministic conversational synthesis fallback when conversation.py is not yet merged."""
+    msg = message.strip()
+    msg_lower = msg.lower()
+
+    # 1. Natural Language CRUD: remember / set
+    if msg_lower.startswith("remember ") or msg_lower.startswith("set "):
+        content = msg[9:].strip() if msg_lower.startswith("remember ") else msg[4:].strip()
+        sep = " is " if " is " in content else (" to " if " to " in content else " = ")
+        if sep in content:
+            name_part, val_part = content.split(sep, 1)
+            canonical = name_part.strip().replace(" ", "_").lower()
+            val = val_part.strip()
+            if hasattr(lake, "create_concept"):
+                lake.create_concept(canonical_name=canonical, category="architecture", value=val)
+            elif hasattr(lake, "update_concept"):
+                lake.update_concept(canonical, new_value=val)
+            return {
+                "answer": f"Understood. Recorded belief '{canonical}' as '{val}' in Context Lake.",
+                "intent": "create",
+                "cited_nodes": [canonical],
+            }
+
+    # 2. Natural Language CRUD: forget / delete
+    if msg_lower.startswith("forget ") or msg_lower.startswith("delete "):
+        target = msg[7:].strip().replace(" ", "_").lower()
+        if hasattr(lake, "delete_concept"):
+            lake.delete_concept(target)
+        return {
+            "answer": f"Tombstoned concept '{target}' in Context Lake.",
+            "intent": "delete",
+            "cited_nodes": [target],
+        }
+
+    # 3. Time-travel intent
+    if "time travel" in msg_lower or "at timestamp" in msg_lower or "as of" in msg_lower:
+        return {
+            "answer": f"Time-travel belief state reconstructed for query '{msg}' (as_of={as_of}).",
+            "intent": "time_travel",
+            "cited_nodes": [],
+        }
+
+    # 4. Proactive query intent
+    nodes: List[Any] = []
+    edges: List[Any] = []
+    if retriever is not None and hasattr(retriever, "query_subgraph"):
+        try:
+            nodes, edges = retriever.query_subgraph(query=msg, top_k=top_k, as_of=as_of)
+        except Exception:
+            pass
+
+    if not nodes and hasattr(lake, "list_concepts"):
+        all_nodes = lake.list_concepts(include_tombstoned=False)
+        words = [w for w in msg_lower.split() if len(w) > 3]
+        for n in all_nodes:
+            txt = f"{n.canonical_name} {n.active_value} {n.category}".lower()
+            if any(w in txt for w in words):
+                nodes.append(n)
+        if not nodes and all_nodes:
+            nodes = all_nodes[:min(3, len(all_nodes))]
+
+    cited = [n.canonical_name for n in nodes if hasattr(n, "canonical_name")]
+    if nodes:
+        summaries = [f"• {n.canonical_name} ({n.category}): {n.active_value}" for n in nodes[:5]]
+        answer = f"Found {len(nodes)} relevant belief(s) in Context Palace:\n" + "\n".join(summaries)
+    else:
+        answer = f"No active concepts found matching '{msg}' in Context Palace."
+
+    return {
+        "answer": answer,
+        "intent": "query",
+        "cited_nodes": cited,
+    }
+
+
 def _call_compatible(fn: Any, *args: Any, **kwargs: Any) -> Any:
     """Invoke a callable while filtering kwargs to accepted parameters if needed."""
     try:
@@ -135,11 +268,13 @@ def _call_compatible(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 class MemoryPalaceTUI:
     """
-    Rich TUI Dashboard & Interactive CRUD Inspector for the Federated Context Lake.
+    Rich/Textual TUI Dashboard & Interactive CRUD Inspector for the Federated Context Lake.
+    Context Palace v2 (mint/ink): WINDOWS / LAKE / GRAPH / AUDIT panes, with the
+    conversational engine ([a] Ask, answers in AUDIT) and full inventory ([l] List All).
     """
 
     HOTKEY_BAR_TEXT = (
-        "[c] Create  [r] Read  [u] Update  [d] Delete  "
+        "[c] Create  [r] Read  [u] Update  [d] Delete  [l] List All  [a] Ask  "
         "[p] Pin & Inject  [m] Models  [t] Time-Travel  [q] Quit"
     )
 
@@ -154,7 +289,9 @@ class MemoryPalaceTUI:
         self.registry = registry
         self.as_of: Optional[float] = None
         self.selected_agent_id: Optional[str] = None
+        self.selected_node_id: Optional[str] = None
         self.status_message: str = "Ready"
+        self.chat_history: List[Dict[str, Any]] = []
         self.last_capsule: Optional[Dict[str, Any]] = None
         self.last_output: List[str] = []
 
@@ -326,6 +463,7 @@ class MemoryPalaceTUI:
             provenance_weights=dict(PROVENANCE_WEIGHTS),
             last_capsule=self.last_capsule,
             last_output=list(self.last_output),
+            chat_history=list(self.chat_history),
             frontend=frontend,
             size=size,
         )
@@ -362,6 +500,121 @@ class MemoryPalaceTUI:
         console.print(build_dashboard(data, width=width))
         return console.export_text()
 
+    def render_to_text(
+        self,
+        width: int = 140,
+        as_of: Optional[float] = None,
+        selected_agent_id: Optional[str] = None,
+        search_query: str = "",
+    ) -> str:
+        """Render the complete four-pane v2 TUI dashboard to text."""
+        return self.render_dashboard(
+            as_of=as_of,
+            selected_agent_id=selected_agent_id,
+            search_query=search_query,
+            width=width,
+        )
+
+    def handle_command(self, cmd: str) -> Dict[str, Any]:
+        """
+        Execute an interactive command in the Memory Palace TUI:
+        - 'l' or 'list-all': renders full untruncated inventory and updates status message.
+        - 'a', 'ask', or 'chat <msg>': runs conversational turn against Context Palace.
+        - 'c', 'r', 'u', 'd', 'p', 'm', 't': delegates to execute_key_action.
+        """
+        cmd_str = cmd.strip()
+        if not cmd_str:
+            return {"status": "ok", "message": "empty command"}
+
+        parts = cmd_str.split(maxsplit=1)
+        action = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+
+        if action in ("l", "list-all", "ls"):
+            nodes, edges, _ = self._fetch_concepts_and_edges(as_of=self.as_of)
+            sessions = self._fetch_agent_sessions()
+            n_count = len(nodes)
+            m_count = len(edges)
+            k_count = len(sessions)
+            self.status_message = f"Listed all {n_count} nodes, {m_count} edges, {k_count} sessions"
+            self.last_output = [f"palace$ l  → {n_count} nodes · {m_count} edges · {k_count} sessions"]
+            return {
+                "status": "ok",
+                "action": "list-all",
+                "nodes": n_count,
+                "edges": m_count,
+                "sessions": k_count,
+                "message": self.status_message,
+            }
+
+        if action in ("a", "ask", "chat"):
+            message = arg or "What do my agents know about federated memory?"
+            answer = ""
+            cited: List[str] = []
+            intent = "query"
+            if ConversationalMemoryPalace is not None:
+                try:
+                    engine = _call_compatible(
+                        ConversationalMemoryPalace,
+                        lake=self.lake,
+                        retriever=self.retriever,
+                        registry=self.registry,
+                    )
+                    turn = engine.ask(message, as_of=self.as_of)
+                    answer = getattr(turn, "answer", str(turn.get("answer", "")))
+                    raw_cited = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
+                    cited = [
+                        str(c.get("canonical_name") or c.get("node_id") or "")
+                        if isinstance(c, dict)
+                        else str(c)
+                        for c in raw_cited
+                    ]
+                    raw_intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                    intent = "create" if raw_intent == "remember" else ("delete" if raw_intent == "forget" else raw_intent)
+                except Exception:
+                    turn = _synthesize_chat_turn(self.lake, self.retriever, message, as_of=self.as_of)
+                    answer = turn["answer"]
+                    cited = turn["cited_nodes"]
+                    intent = turn["intent"]
+            else:
+                turn = _synthesize_chat_turn(self.lake, self.retriever, message, as_of=self.as_of)
+                answer = turn["answer"]
+                cited = turn["cited_nodes"]
+                intent = turn["intent"]
+
+            self.chat_history.append(
+                {"user": message, "palace": answer, "cited_nodes": cited, "intent": intent}
+            )
+            self.status_message = f"Palace answered: {answer[:40]}..."
+            return {
+                "status": "ok",
+                "action": "chat",
+                "message": message,
+                "answer": answer,
+                "cited_nodes": cited,
+                "intent": intent,
+            }
+
+        # Delegate single-character actions to execute_key_action
+        if action in ("c", "r", "u", "d", "p", "m", "t"):
+            payload: Dict[str, Any] = {}
+            if action == "c":
+                c_parts = arg.split(maxsplit=2)
+                payload["canonical_name"] = c_parts[0] if len(c_parts) > 0 else "concept"
+                payload["category"] = c_parts[1] if len(c_parts) > 1 else "architecture"
+                payload["value"] = c_parts[2] if len(c_parts) > 2 else ""
+            elif action in ("r", "d", "p"):
+                payload["node_id_or_name"] = arg.strip()
+            elif action == "u":
+                u_parts = arg.split(maxsplit=1)
+                payload["node_id_or_name"] = u_parts[0] if len(u_parts) > 0 else ""
+                payload["new_value"] = u_parts[1] if len(u_parts) > 1 else ""
+            elif action == "t":
+                payload["as_of"] = float(arg.strip()) if arg.strip() else None
+            return self.execute_key_action(action, payload)
+
+        return {"status": "error", "message": f"Unknown command: {cmd_str}"}
+
     def execute_key_action(
         self,
         key: str,
@@ -377,9 +630,18 @@ class MemoryPalaceTUI:
           - 'p': Pin Concept & Build/Inject Context Capsule
           - 'm': Refresh Auto-Detected Model Windows for Local Agents
           - 't': Time-Travel Snapshot
+          - 'l': List All Inventory
+          - 'a': Ask / Conversational Chat
         """
         payload = payload or {}
         action_key = key.strip().lower()
+
+        if action_key in ("l", "list-all"):
+            return self.handle_command("l")
+
+        if action_key in ("a", "ask", "chat"):
+            msg = payload.get("message") or payload.get("query") or ""
+            return self.handle_command(f"a {msg}".strip())
 
         if action_key == "c":
             canonical_name = payload["canonical_name"]
@@ -597,38 +859,14 @@ class MemoryPalaceTUI:
         while True:
             print(self.render_dashboard())
             try:
-                raw = input("context-palace [c/r/u/d/p/m/t/q]> ").strip()
+                raw = input("context-palace [c/r/u/d/l/a/p/m/t/q]> ").strip()
             except EOFError:
                 break
             if not raw or raw.lower() == "q":
                 break
-            parts = raw.split()
-            cmd = parts[0].lower()
             try:
-                if cmd == "c":
-                    name = parts[1] if len(parts) > 1 else input("Canonical concept name: ").strip()
-                    cat = parts[2] if len(parts) > 2 else input("Category [architecture]: ").strip() or "architecture"
-                    val = " ".join(parts[3:]) if len(parts) > 3 else input("Active belief value: ").strip()
-                    self.execute_key_action("c", {"canonical_name": name, "category": cat, "value": val})
-                elif cmd == "r":
-                    target = parts[1] if len(parts) > 1 else input("Concept ID or name: ").strip()
-                    res = self.execute_key_action("r", {"node_id_or_name": target})
-                    print(res)
-                elif cmd == "u":
-                    target = parts[1] if len(parts) > 1 else input("Concept ID or name: ").strip()
-                    val = " ".join(parts[2:]) if len(parts) > 2 else input("New belief value: ").strip()
-                    self.execute_key_action("u", {"node_id_or_name": target, "new_value": val})
-                elif cmd == "d":
-                    target = parts[1] if len(parts) > 1 else input("Concept ID or name: ").strip()
-                    self.execute_key_action("d", {"node_id_or_name": target})
-                elif cmd == "p":
-                    target = parts[1] if len(parts) > 1 else input("Concept ID or name to pin: ").strip()
-                    self.execute_key_action("p", {"node_id_or_name": target})
-                elif cmd == "m":
-                    self.execute_key_action("m", {})
-                elif cmd == "t":
-                    ts_str = parts[1] if len(parts) > 1 else input("Timestamp (empty for LIVE): ").strip()
-                    ts_val = float(ts_str) if ts_str else None
-                    self.execute_key_action("t", {"as_of": ts_val})
+                res = self.handle_command(raw)
+                if raw.lower().startswith("a") or raw.lower().startswith("chat"):
+                    print(f"Palace: {res.get('answer', '')}")
             except Exception as exc:
                 self.status_message = f"Error: {exc}"

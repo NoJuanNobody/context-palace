@@ -59,6 +59,8 @@ HOTKEYS: Tuple[Tuple[str, str], ...] = (
     ("r", "Read"),
     ("u", "Update"),
     ("d", "Delete"),
+    ("l", "List All"),
+    ("a", "Ask"),
     ("p", "Pin & Inject"),
     ("m", "Models"),
     ("t", "Time-Travel"),
@@ -103,6 +105,7 @@ class DashboardData:
     provenance_weights: Dict[str, float] = field(default_factory=dict)
     last_capsule: Optional[Dict[str, Any]] = None
     last_output: List[str] = field(default_factory=list)
+    chat_history: List[Dict[str, Any]] = field(default_factory=list)
     frontend: str = "rich"
     size: Optional[Tuple[int, int]] = None
 
@@ -331,6 +334,22 @@ def build_lake_pane(data: DashboardData) -> Group:
     nums.add_row(*[Text(k, style=S_LABEL) for k, _ in counts])
     nums.add_row(*[Text(f"{v:,}", style=S_STRONG) for _, v in counts])
 
+    # Tier distribution (definitions from the v2 FigCraft TUI): HOT = pinned or conf >= 0.85,
+    # WARM = 0.50 <= conf < 0.85, COLD = conf < 0.50, SUPERSEDED = tombstoned.
+    active = [n for n in data.nodes if not getattr(n, "tombstoned", False)]
+    tiers = (
+        ("HOT", sum(1 for n in active if n.pinned or n.confidence >= 0.85)),
+        ("WARM", sum(1 for n in active if not n.pinned and 0.50 <= n.confidence < 0.85)),
+        ("COLD", sum(1 for n in active if not n.pinned and n.confidence < 0.50)),
+        ("SUPERSEDED", sum(1 for n in data.nodes if getattr(n, "tombstoned", False))),
+    )
+    tier_line = Text("TIERS  ", style=S_LABEL)
+    for i, (name, count) in enumerate(tiers):
+        if i:
+            tier_line.append("  ·  ", style=S_28)
+        tier_line.append(f"{name.lower()} ", style=S_45)
+        tier_line.append(f"{count:,}", style=S_INK)
+
     end = data.as_of if data.as_of is not None else data.now
     spark = sparkline(data.revision_timestamps, end=end)
     rev_note = Text(
@@ -374,6 +393,7 @@ def build_lake_pane(data: DashboardData) -> Group:
     return Group(
         pane_heading("Lake", f"SQLite WAL · {lake_dir}"),
         nums,
+        tier_line,
         spark,
         rev_note,
         wm,
@@ -478,9 +498,9 @@ def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
 # ---------------------------------------------------------------------------
 # AUDIT
 # ---------------------------------------------------------------------------
-def build_audit_pane(data: DashboardData, max_events: int = 3) -> Group:
+def build_audit_pane(data: DashboardData, max_events: int = 3, max_chat_turns: int = 2) -> Group:
     by_id = data.node_by_id
-    lines: List[RenderableType] = [pane_heading("Audit", "consensus + last capsule")]
+    lines: List[RenderableType] = [pane_heading("Audit", "consensus · last capsule · [a] ask")]
     lines.append(Text("ConflictResolutionEvent", style=S_INK))
     events = sorted(data.conflicts, key=lambda e: -float(getattr(e, "resolved_at", 0.0)))[:max_events]
     if not events:
@@ -539,6 +559,27 @@ def build_audit_pane(data: DashboardData, max_events: int = 3) -> Group:
         t.append("no capsule pushed this session · [p] Pin & Inject", style=S_45)
         lines.append(t)
     lines.append(Text(""))
+
+    # Conversational engine ([a] Ask): last turns, answered from the lake.
+    if data.chat_history:
+        for turn in data.chat_history[-max_chat_turns:]:
+            you = Text("You:    ", style=S_45)
+            you.append(str(turn.get("user", "")), style=S_INK)
+            lines.append(you)
+            answer_lines = str(turn.get("palace", "")).splitlines() or [""]
+            for i, ans in enumerate(answer_lines[:5]):
+                t = Text("Palace: " if i == 0 else "        ", style=S_45)
+                t.append(ans, style=S_INK)
+                lines.append(t)
+            if len(answer_lines) > 5:
+                lines.append(Text(f"        … {len(answer_lines) - 5} more", style=S_45))
+            cited = turn.get("cited_nodes") or []
+            if cited:
+                lines.append(Text(f"        └─ cited: {', '.join(map(str, cited[:6]))}", style=S_60))
+        lines.append(Text(""))
+    else:
+        lines.append(Text("[a] Ask the palace · e.g. 'What do my agents know about auth?', 'Remember port is 8443'", style=S_45))
+        lines.append(Text(""))
 
     for line in data.last_output[-6:]:
         lines.append(Text(line, style=S_60, overflow="fold"))
