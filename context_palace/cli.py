@@ -863,10 +863,49 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         ingested_concepts = 0
         for sess in sessions:
-            if hasattr(lake, "upsert_agent_session"):
-                lake.upsert_agent_session(sess)
+            prior = lake.get_agent_session(sess.agent_id) if hasattr(lake, "get_agent_session") else None
             if args.ingest and extractor is not None and sess.transcript_path:
-                if hasattr(extractor, "ingest_session_into_lake"):
+                sess.last_processed_turn = prior.last_processed_turn if prior is not None else 0
+                if hasattr(extractor, "ingest_turns"):
+                    turns_list: List[Dict[str, Any]] = []
+                    try:
+                        with open(sess.transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+                            for idx, raw_line in enumerate(fh, start=1):
+                                raw_line = raw_line.strip()
+                                if not raw_line:
+                                    continue
+                                try:
+                                    obj = json.loads(raw_line)
+                                    if isinstance(obj, dict):
+                                        content_val = (
+                                            obj.get("content")
+                                            or (obj.get("message", {}).get("content") if isinstance(obj.get("message"), dict) else None)
+                                            or ""
+                                        )
+                                        if isinstance(content_val, list):
+                                            content_val = " ".join(
+                                                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                                                for part in content_val
+                                            )
+                                        if content_val and len(str(content_val)) <= 6000:
+                                            turns_list.append(
+                                                {
+                                                    "turn_id": idx,
+                                                    "role": obj.get("source") or obj.get("type") or "agent_turn",
+                                                    "content": str(content_val),
+                                                }
+                                            )
+                                except Exception:
+                                    continue
+                    except OSError:
+                        turns_list = []
+                    if turns_list:
+                        res = extractor.ingest_turns(lake=lake, session=sess, turns=turns_list)
+                        if isinstance(res, dict):
+                            ingested_concepts += int(res.get("created_nodes", 0)) + int(
+                                res.get("merged_nodes", 0)
+                            )
+                elif hasattr(extractor, "ingest_session_into_lake"):
                     res = _call_compatible(
                         extractor.ingest_session_into_lake,
                         session=sess,
@@ -876,6 +915,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         ingested_concepts += int(res.get("concepts_created", 0)) + int(
                             res.get("concepts_updated", 0)
                         )
+            if hasattr(lake, "upsert_agent_session"):
+                lake.upsert_agent_session(sess)
         print(
             json.dumps(
                 {
