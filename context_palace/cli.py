@@ -820,6 +820,23 @@ def build_parser() -> argparse.ArgumentParser:
     # 7. mcp
     subparsers.add_parser("mcp", help="Run stdio JSON-RPC MCP server loop")
 
+    # 8. agy-hook
+    subparsers.add_parser(
+        "agy-hook",
+        help="Handle Antigravity SessionStart/PreInvocation/PostInvocation lifecycle hook stdin JSON",
+    )
+
+    # 9. install-agy-mod
+    p_mod = subparsers.add_parser(
+        "install-agy-mod",
+        help="Install Context Palace as an Antigravity Plugin Mod (MCP + Hooks + /context-palace Skill + Rules)",
+    )
+    p_mod.add_argument(
+        "--config-root",
+        default=str(Path("~/.gemini/config").expanduser()),
+        help="Target Antigravity config directory (default: ~/.gemini/config)",
+    )
+
     return parser
 
 
@@ -1084,6 +1101,153 @@ def main(argv: Optional[List[str]] = None) -> int:
                 }
             sys.stdout.write(json.dumps(resp) + "\n")
             sys.stdout.flush()
+        return 0
+
+    if sub == "agy-hook":
+        from context_palace.agy_hook import handle_agy_hook_payload
+
+        raw_stdin = sys.stdin.read().strip()
+        if not raw_stdin:
+            sys.stdout.write("{}\n")
+            return 0
+        try:
+            payload = json.loads(raw_stdin)
+            resp = handle_agy_hook_payload(payload, db_path=db_path) if isinstance(payload, dict) else {}
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+            return 0
+        except Exception:
+            sys.stdout.write("{}\n")
+            sys.stdout.flush()
+            return 0
+
+    if sub == "install-agy-mod":
+        cfg_root = Path(args.config_root).expanduser()
+        plugin_dir = cfg_root / "plugins" / "context-palace"
+        skills_dir = plugin_dir / "skills" / "context-palace"
+        rules_dir = plugin_dir / "rules"
+        global_skill_dir = cfg_root / "skills" / "context-palace"
+
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        global_skill_dir.mkdir(parents=True, exist_ok=True)
+
+        cli_bin = "/opt/homebrew/bin/context-palace"
+        if not os.path.exists(cli_bin):
+            cli_bin = f"{sys.executable} -m context_palace.cli"
+
+        # 1. plugin.json
+        plugin_manifest = {
+            "name": "context-palace",
+            "author": {"name": "Alejandro Londono", "url": "https://github.com/NoJuanNobody"},
+            "repository": "https://github.com/NoJuanNobody/context-palace",
+        }
+        (plugin_dir / "plugin.json").write_text(
+            json.dumps(plugin_manifest, indent=2) + "\n", encoding="utf-8"
+        )
+
+        # 2. Plugin mcp_config.json
+        mcp_entry = (
+            {"command": "/opt/homebrew/bin/context-palace", "args": ["mcp"]}
+            if os.path.exists("/opt/homebrew/bin/context-palace")
+            else {
+                "command": sys.executable,
+                "args": ["-m", "context_palace.cli", "mcp"],
+                "env": {"PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
+            }
+        )
+        plugin_mcp = {"mcpServers": {"context_palace": mcp_entry}}
+        (plugin_dir / "mcp_config.json").write_text(
+            json.dumps(plugin_mcp, indent=2) + "\n", encoding="utf-8"
+        )
+
+        # 3. hooks.json (SessionStart, PreInvocation, PostInvocation)
+        hook_cmd = (
+            "/opt/homebrew/bin/context-palace agy-hook"
+            if os.path.exists("/opt/homebrew/bin/context-palace")
+            else f"{sys.executable} -m context_palace.cli agy-hook"
+        )
+        hooks_manifest = {
+            "context-palace-lifecycle": {
+                "enabled": True,
+                "SessionStart": [
+                    {
+                        "type": "command",
+                        "command": hook_cmd,
+                        "timeout": 5,
+                    }
+                ],
+                "PreInvocation": [
+                    {
+                        "type": "command",
+                        "command": hook_cmd,
+                        "timeout": 5,
+                    }
+                ],
+                "PostInvocation": [
+                    {
+                        "type": "command",
+                        "command": hook_cmd,
+                        "timeout": 5,
+                    }
+                ],
+            }
+        }
+        (plugin_dir / "hooks.json").write_text(
+            json.dumps(hooks_manifest, indent=2) + "\n", encoding="utf-8"
+        )
+
+        # 4. rules/AGENTS.md
+        rules_md = (
+            "# Context Palace Antigravity Mod Rules\n\n"
+            "- **Context Palace Federated Memory Lake (`~/.context_palace/context_lake.db`)** is active in this workspace.\n"
+            "- Use `context-palace` CLI or the `context_palace` MCP tools (`context_query`, `context_inject_capsule`, `context_upsert`, `context_forget`, `context_time_travel`, `context_window_status`) to inspect or edit working memory across local agents.\n"
+        )
+        (rules_dir / "AGENTS.md").write_text(rules_md, encoding="utf-8")
+
+        # 5. Copy SKILL.md into plugin and global skills directory
+        repo_skill = Path(__file__).resolve().parent.parent / "SKILL.md"
+        skill_text = (
+            repo_skill.read_text(encoding="utf-8")
+            if repo_skill.exists()
+            else "---\nname: context-palace\ndescription: Federated Context Lake & TUI CRUD Memory Palace\n---\n# Context Palace\n"
+        )
+        (skills_dir / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        (global_skill_dir / "SKILL.md").write_text(skill_text, encoding="utf-8")
+
+        # 6. Merge into global mcp_config.json if present
+        global_mcp_path = cfg_root / "mcp_config.json"
+        existing_mcp: Dict[str, Any] = {"mcpServers": {}}
+        if global_mcp_path.exists():
+            try:
+                existing_mcp = json.loads(global_mcp_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing_mcp = {"mcpServers": {}}
+        if "mcpServers" not in existing_mcp or not isinstance(existing_mcp["mcpServers"], dict):
+            existing_mcp["mcpServers"] = {}
+        existing_mcp["mcpServers"]["context_palace"] = mcp_entry
+        global_mcp_path.write_text(json.dumps(existing_mcp, indent=2) + "\n", encoding="utf-8")
+
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "plugin_dir": str(plugin_dir),
+                    "global_skill": str(global_skill_dir / "SKILL.md"),
+                    "global_mcp_config": str(global_mcp_path),
+                    "hooks_installed": ["SessionStart", "PreInvocation", "PostInvocation"],
+                    "mcp_tools_exposed": [
+                        "context_query",
+                        "context_inject_capsule",
+                        "context_upsert",
+                        "context_forget",
+                        "context_time_travel",
+                        "context_window_status",
+                    ],
+                },
+                indent=2,
+            )
+        )
         return 0
 
     return 0
