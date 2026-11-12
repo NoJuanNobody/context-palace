@@ -595,8 +595,15 @@ class ContextPalaceMCPServer:
                 )
                 turn = conv.ask(message, as_of=as_of, top_k=top_k)
                 answer = getattr(turn, "answer", str(turn.get("answer", "")))
-                cited_nodes = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
-                intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                raw_cited = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
+                cited_nodes = [
+                    str(c.get("canonical_name") or c.get("node_id") or "")
+                    if isinstance(c, dict)
+                    else str(c)
+                    for c in raw_cited
+                ]
+                raw_intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                intent = "create" if raw_intent == "remember" else ("delete" if raw_intent == "forget" else raw_intent)
             except Exception:
                 from context_palace.tui import _synthesize_chat_turn
                 turn = _synthesize_chat_turn(

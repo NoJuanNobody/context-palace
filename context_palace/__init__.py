@@ -20,7 +20,16 @@ from context_palace.consensus import PROVENANCE_WEIGHTS, ConsensusEngine
 from context_palace.extractor import IncrementalDeltaExtractor
 from context_palace.retrieval import DualDirectionRetriever
 from context_palace.mcp_server import ContextPalaceMCPServer
-from context_palace.tui import MemoryPalaceTUI
+from context_palace.tui import MemoryPalaceTUI, render_unicode_bar
+from context_palace.inventory import (
+    LakeInventoryExporter,
+    list_everything,
+    render_list_all_report,
+)
+from context_palace.conversation import (
+    ConversationTurn,
+    ConversationalMemoryPalace,
+)
 
 __all__ = [
     "ModelWindowSpec",
@@ -42,4 +51,10 @@ __all__ = [
     "DualDirectionRetriever",
     "ContextPalaceMCPServer",
     "MemoryPalaceTUI",
+    "render_unicode_bar",
+    "LakeInventoryExporter",
+    "list_everything",
+    "render_list_all_report",
+    "ConversationTurn",
+    "ConversationalMemoryPalace",
 ]

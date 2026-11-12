@@ -429,17 +429,23 @@ class ConversationalMemoryPalace:
         if intent == "remember":
             content = params.get("content", "").strip()
             mem_type = params.get("memory_type", "fact")
-            canonical_name = self._derive_canonical_name(content)
+            kv_match = re.match(r"^([a-zA-Z0-9_]+)\s+(?:is|=)\s+(.+)$", content, flags=re.IGNORECASE)
+            if kv_match:
+                canonical_name = kv_match.group(1).strip()
+                active_val = kv_match.group(2).strip()
+            else:
+                canonical_name = self._derive_canonical_name(content)
+                active_val = content
 
             new_node = ConceptNode(
                 node_id=f"node-{uuid.uuid4().hex[:10]}",
                 canonical_name=canonical_name,
                 category=mem_type,
-                active_value=content,
-                summary=f"{canonical_name}: {content[:120]}",
+                active_value=active_val,
+                summary=f"{canonical_name}: {active_val[:120]}",
                 confidence=0.95,
                 pinned=False,
-                embedding=compute_text_embedding(f"{canonical_name} {mem_type} {content}"),
+                embedding=compute_text_embedding(f"{canonical_name} {mem_type} {active_val}"),
                 source_agent_id=self.agent_name,
                 created_at=now_ts,
                 updated_at=now_ts,
@@ -833,7 +839,7 @@ class ConversationalMemoryPalace:
                 # 100% deterministic offline grounded synthesis
                 top_node = retrieved_nodes[0]
                 lines = [
-                    f"Grounded in the federated memory lake, here is what is known regarding **{query}**:\n",
+                    f"Found {len(retrieved_nodes)} relevant belief(s) — Grounded in the federated memory lake, here is what is known regarding **{query}**:\n",
                     f"Primary fact: **{top_node.canonical_name}** is documented as: \"{top_node.active_value}\".\n",
                     "**Cited Palace Memories:**",
                 ]

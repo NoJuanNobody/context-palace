@@ -925,7 +925,7 @@ def _load_components(db_path: str) -> Dict[str, Any]:
         consensus = None
 
     try:
-        from context_palace.retriever import DualDirectionRetriever  # type: ignore
+        from context_palace.retrieval import DualDirectionRetriever  # type: ignore
         retriever = _call_compatible(DualDirectionRetriever, lake=lake, registry=registry)
     except Exception:
         retriever = _FallbackRetriever(lake=lake, registry=registry)
@@ -1596,8 +1596,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
                     turn = engine.ask(msg_text, as_of=as_of, top_k=top_k)
                     answer = getattr(turn, "answer", str(turn.get("answer", "")))
-                    cited_nodes = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
-                    intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                    raw_cited = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
+                    cited_nodes = [
+                        str(c.get("canonical_name") or c.get("node_id") or "")
+                        if isinstance(c, dict)
+                        else str(c)
+                        for c in raw_cited
+                    ]
+                    raw_intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                    intent = "create" if raw_intent == "remember" else ("delete" if raw_intent == "forget" else raw_intent)
                 except Exception:
                     turn = _synthesize_chat_turn(lake, retriever, msg_text, as_of=as_of, top_k=top_k)
                     answer = turn["answer"]

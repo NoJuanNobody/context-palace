@@ -808,8 +808,15 @@ class MemoryPalaceTUI:
                     )
                     turn = engine.ask(message, as_of=self.as_of)
                     answer = getattr(turn, "answer", str(turn.get("answer", "")))
-                    cited = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
-                    intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                    raw_cited = getattr(turn, "cited_nodes", list(turn.get("cited_nodes", [])))
+                    cited = [
+                        str(c.get("canonical_name") or c.get("node_id") or "")
+                        if isinstance(c, dict)
+                        else str(c)
+                        for c in raw_cited
+                    ]
+                    raw_intent = getattr(turn, "intent", str(turn.get("intent", "query")))
+                    intent = "create" if raw_intent == "remember" else ("delete" if raw_intent == "forget" else raw_intent)
                 except Exception:
                     turn = _synthesize_chat_turn(self.lake, self.retriever, message, as_of=self.as_of)
                     answer = turn["answer"]
