@@ -881,6 +881,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 try:
                                     obj = json.loads(raw_line)
                                     if isinstance(obj, dict):
+                                        step_type = str(obj.get("type") or "")
+                                        if step_type and step_type not in ("USER_INPUT", "PLANNER_RESPONSE", ""):
+                                            continue
                                         content_val = (
                                             obj.get("content")
                                             or (obj.get("message", {}).get("content") if isinstance(obj.get("message"), dict) else None)

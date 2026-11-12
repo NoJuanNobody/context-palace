@@ -281,7 +281,39 @@ class IncrementalDeltaExtractor:
             )
 
         # Split into lines and sentence clauses without breaking version numbers or IPs
-        raw_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        noise_prefixes = (
+            "<div",
+            "</div",
+            "created at:",
+            "completed at:",
+            "command exited with code",
+            "command output:",
+            "showing lines ",
+            "task logs are available at:",
+            "the tool's output was truncated",
+            "here is a preview",
+            "enumerating objects:",
+            "counting objects:",
+            "compressing objects:",
+            "writing objects:",
+            "remote: resolving deltas:",
+            "total ",
+            "working...",
+        )
+        raw_lines: List[str] = []
+        for ln in text.splitlines():
+            s_ln = ln.strip()
+            if not s_ln:
+                continue
+            low_ln = s_ln.lower()
+            if low_ln.startswith(noise_prefixes):
+                continue
+            if re.match(r"^\d+:\s", s_ln):
+                continue
+            if "style=" in low_ln or "rgba(" in low_ln:
+                continue
+            raw_lines.append(s_ln)
+
         clauses: List[str] = []
         for line in raw_lines:
             parts = re.split(r"(?:;\s+|\.\s+(?=[A-Z*`]))", line)
@@ -368,8 +400,8 @@ class IncrementalDeltaExtractor:
                     if node is not None:
                         matched_clause = True
 
-            # 4. Fallback salient technical clause extraction if no explicit pattern matched
-            if not matched_clause and len(clause) >= 12:
+            # 4. Fallback salient technical clause extraction if no explicit pattern matched in short turns
+            if not matched_clause and not nodes_by_name and len(clauses) <= 4 and len(clause) >= 12:
                 words = [
                     w.lower()
                     for w in re.findall(r"[A-Za-z][A-Za-z0-9_\-]*", clause)
