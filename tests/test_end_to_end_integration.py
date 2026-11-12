@@ -124,6 +124,6 @@ def test_full_federated_context_lake_lifecycle(tmp_path: Path) -> None:
     )
     assert "result" in rpc_resp
     dashboard_text = tui.render_dashboard()
-    assert "CONTEXT PALACE" in dashboard_text
+    assert "Context Palace" in dashboard_text
     assert "agy-agent-1" in dashboard_text
     assert "claude-agent-1" in dashboard_text

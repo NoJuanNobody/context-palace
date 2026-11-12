@@ -139,8 +139,8 @@ class MemoryPalaceTUI:
     """
 
     HOTKEY_BAR_TEXT = (
-        "[c] Create Concept  [r] Read/History  [u] Update Belief  [d] Delete/Evict  "
-        "[p] Pin & Inject Capsule  [m] Refresh Model Windows  [t] Time-Travel  [q] Quit"
+        "[c] Create  [r] Read  [u] Update  [d] Delete  "
+        "[p] Pin & Inject  [m] Models  [t] Time-Travel  [q] Quit"
     )
 
     def __init__(
@@ -155,6 +155,8 @@ class MemoryPalaceTUI:
         self.as_of: Optional[float] = None
         self.selected_agent_id: Optional[str] = None
         self.status_message: str = "Ready"
+        self.last_capsule: Optional[Dict[str, Any]] = None
+        self.last_output: List[str] = []
 
     def _fetch_agent_sessions(self) -> List[AgentSession]:
         if hasattr(self.lake, "list_agent_sessions"):
@@ -249,6 +251,85 @@ class MemoryPalaceTUI:
 
         return nodes, edges, conflicts
 
+    def collect_dashboard_data(
+        self,
+        as_of: Optional[float] = None,
+        selected_agent_id: Optional[str] = None,
+        search_query: str = "",
+        frontend: str = "rich",
+        size: Optional[tuple] = None,
+    ) -> "DashboardData":
+        """
+        Gather live data for the WINDOWS / LAKE / GRAPH / AUDIT panes from the lake,
+        consensus weights and the last pushed capsule.
+        """
+        import time as _time
+
+        from context_palace.consensus import PROVENANCE_WEIGHTS
+        from context_palace.tui_view import DashboardData
+
+        effective_as_of = as_of if as_of is not None else self.as_of
+        effective_agent = selected_agent_id if selected_agent_id is not None else self.selected_agent_id
+
+        sessions = self._fetch_agent_sessions()
+        nodes, edges, conflicts = self._fetch_concepts_and_edges(
+            as_of=effective_as_of, search_query=search_query
+        )
+
+        # Provenance per node = provenance_type of its active (or latest as-of) revision.
+        node_prov: Dict[str, str] = {}
+        rev_prov: Dict[str, str] = {}
+        if hasattr(self.lake, "get_belief_history"):
+            wanted = {n.node_id for n in nodes}
+            wanted.update(c.node_id for c in conflicts)
+            for nid in wanted:
+                try:
+                    history = list(self.lake.get_belief_history(nid))
+                except Exception:
+                    continue
+                for rev in history:
+                    rev_prov[rev.revision_id] = rev.provenance_type
+                visible = [
+                    r
+                    for r in history
+                    if effective_as_of is None
+                    or (r.valid_from <= effective_as_of and (r.valid_to is None or r.valid_to > effective_as_of))
+                ]
+                active = [r for r in visible if effective_as_of is not None or r.valid_to is None] or visible
+                if active:
+                    node_prov[nid] = active[-1].provenance_type
+
+        rev_count: Optional[int] = None
+        rev_ts: List[float] = []
+        if hasattr(self.lake, "list_revision_timestamps"):
+            try:
+                rev_ts = list(self.lake.list_revision_timestamps())
+                rev_count = len(rev_ts)
+            except Exception:
+                rev_ts = []
+
+        return DashboardData(
+            now=_time.time(),
+            as_of=effective_as_of,
+            db_path=str(getattr(self.lake, "db_path", ":memory:")),
+            status_message=self.status_message,
+            search_query=search_query,
+            selected_agent_id=effective_agent,
+            sessions=sessions,
+            nodes=nodes,
+            edges=edges,
+            conflicts=conflicts,
+            node_provenance=node_prov,
+            revision_provenance=rev_prov,
+            revision_count=rev_count,
+            revision_timestamps=rev_ts,
+            provenance_weights=dict(PROVENANCE_WEIGHTS),
+            last_capsule=self.last_capsule,
+            last_output=list(self.last_output),
+            frontend=frontend,
+            size=size,
+        )
+
     def render_dashboard(
         self,
         as_of: Optional[float] = None,
@@ -257,177 +338,28 @@ class MemoryPalaceTUI:
         width: int = 120,
     ) -> str:
         """
-        Render the complete Memory Palace TUI into a formatted string.
+        Render the v2 Memory Palace TUI (header, WINDOWS / LAKE / GRAPH / AUDIT panes,
+        hotkey status bar) into a plain-text string. Below 160 columns the 2x2 grid
+        stacks into a single column so the WINDOWS table keeps all of its columns.
         """
-        effective_as_of = as_of if as_of is not None else self.as_of
-        effective_agent = selected_agent_id if selected_agent_id is not None else self.selected_agent_id
+        from rich.console import Console as RichConsole
 
-        console = Console(record=True, width=width, force_terminal=False)
+        from context_palace.tui_view import build_dashboard
 
-        # 1. Header Banner
-        mode_str = (
-            f"TIME-TRAVEL as_of={effective_as_of:.2f}"
-            if effective_as_of is not None
-            else "LIVE"
+        data = self.collect_dashboard_data(
+            as_of=as_of,
+            selected_agent_id=selected_agent_id,
+            search_query=search_query,
+            frontend="rich",
+            size=(width, 0),
         )
-        header_text = Text(
-            f"CONTEXT PALACE — Federated Memory Lake & TUI CRUD Inspector  [{mode_str}]",
-            style="bold cyan",
-        )
-        sub_line = Text(
-            f"Status: {self.status_message}"
-            + (f" | Selected Agent: {effective_agent}" if effective_agent else "")
-            + (f" | Filter: '{search_query}'" if search_query else ""),
-            style="dim",
-        )
-        header_panel = Panel(
-            Group(header_text, sub_line),
-            border_style="bright_blue",
-            title="Memory Palace Control Plane",
-        )
+        data.size = None
+        import io
 
-        # 2. Connected Local Agents & Auto-Detected Model Context Windows Table
-        agents_table = Table(
-            title="Connected Local Agents & Auto-Detected Model Context Windows",
-            expand=True,
-            show_lines=False,
+        console = RichConsole(
+            record=True, width=width, force_terminal=False, color_system=None, file=io.StringIO()
         )
-        agents_table.add_column("Agent ID", style="bold white", no_wrap=True)
-        agents_table.add_column("Harness", style="cyan")
-        agents_table.add_column("Auto-Detected Model", style="magenta")
-        agents_table.add_column("Context Usage (Used / Max)", justify="right")
-        agents_table.add_column("Utilization %", justify="right")
-        agents_table.add_column("Free Headroom", justify="right")
-        agents_table.add_column("Adaptive Capsule Budget", justify="right")
-        agents_table.add_column("Status", justify="center")
-
-        sessions = self._fetch_agent_sessions()
-        if not sessions:
-            agents_table.add_row(
-                "(no agents registered)",
-                "-",
-                "-",
-                "0 / 0",
-                "0.0%",
-                "0",
-                "0",
-                "IDLE",
-            )
-        else:
-            for sess in sessions:
-                status_label = "COMPACT NOW" if sess.needs_compaction else "HEALTHY"
-                status_style = "bold red" if sess.needs_compaction else "bold green"
-                bar = ProgressBar(total=max(1, sess.max_context_tokens), completed=sess.used_tokens, width=12)
-                _ = bar
-                agents_table.add_row(
-                    sess.agent_id,
-                    sess.harness_type,
-                    sess.model_id,
-                    f"{sess.used_tokens:,} / {sess.max_context_tokens:,}",
-                    f"{sess.utilization_pct:.1f}%",
-                    f"{sess.remaining_headroom:,}",
-                    f"{sess.adaptive_capsule_budget():,}",
-                    Text(status_label, style=status_style),
-                )
-
-        # 3. Memory Palace Knowledge Graph (CRUD Table)
-        nodes, edges, conflicts = self._fetch_concepts_and_edges(
-            as_of=effective_as_of, search_query=search_query
-        )
-        sorted_nodes = sorted(
-            nodes,
-            key=lambda n: (not bool(n.pinned), -float(n.confidence), -float(n.updated_at)),
-        )
-        max_display_nodes = 20
-        displayed_nodes = sorted_nodes[:max_display_nodes]
-        count_label = (
-            f"Showing {len(displayed_nodes)} of {len(nodes):,} active concepts"
-            if len(nodes) > max_display_nodes
-            else f"{len(nodes):,} active concepts"
-        )
-        concepts_table = Table(
-            title=f"Memory Palace Knowledge Graph (CRUD Table — {count_label})",
-            expand=True,
-            show_lines=False,
-        )
-        concepts_table.add_column("Node ID", style="dim", no_wrap=True)
-        concepts_table.add_column("Canonical Concept", style="bold yellow")
-        concepts_table.add_column("Category", style="cyan")
-        concepts_table.add_column("Active Belief Value", style="white")
-        concepts_table.add_column("Confidence", justify="right")
-        concepts_table.add_column("Source Agent", style="magenta")
-        concepts_table.add_column("Pinned", justify="center")
-
-        if not displayed_nodes:
-            concepts_table.add_row(
-                "-",
-                "(no active concepts)",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-            )
-        else:
-            for node in displayed_nodes:
-                pin_marker = "PINNED" if node.pinned else "-"
-                val_preview = (
-                    node.active_value[:76] + "..."
-                    if len(node.active_value) > 79
-                    else node.active_value
-                )
-                concepts_table.add_row(
-                    node.node_id,
-                    node.canonical_name[:36],
-                    node.category,
-                    val_preview,
-                    f"{node.confidence:.2f}",
-                    node.source_agent_id,
-                    pin_marker,
-                )
-
-        # 4. Relationships & Consensus Audit Panel
-        node_name_by_id = {n.node_id: n.canonical_name for n in nodes}
-        rel_lines: List[str] = []
-        if edges:
-            for edge in edges[:12]:
-                src_label = node_name_by_id.get(edge.source_id, edge.source_id)
-                dst_label = node_name_by_id.get(edge.target_id, edge.target_id)
-                rel_lines.append(
-                    f"Edge: {src_label} -> [{edge.relation_type}] -> {dst_label} (w={edge.weight:.2f}, via {edge.source_agent_id})"
-                )
-        else:
-            rel_lines.append("Edges: (no active relation edges)")
-
-        if conflicts:
-            for ev in conflicts[:8]:
-                rel_lines.append(
-                    f"Conflict Audit [{ev.event_id}]: node={ev.node_id} winner={ev.winning_agent_id} "
-                    f"({ev.winning_score:.2f}) over {ev.losing_agent_id} ({ev.losing_score:.2f}) — {ev.reason}"
-                )
-        else:
-            rel_lines.append("Consensus Audit: 0 unresolved conflicts")
-
-        audit_panel = Panel(
-            "\n".join(rel_lines),
-            title="Relationships & Consensus Audit Panel",
-            border_style="magenta",
-        )
-
-        # 5. Interactive CRUD Hotkey Bar
-        hotkey_panel = Panel(
-            Text(self.HOTKEY_BAR_TEXT, style="bold white"),
-            title="Interactive CRUD Hotkey Bar",
-            border_style="green",
-        )
-
-        _layout = Layout()
-        console.print(header_panel)
-        console.print(agents_table)
-        console.print(concepts_table)
-        console.print(audit_panel)
-        console.print(hotkey_panel)
-
+        console.print(build_dashboard(data, width=width))
         return console.export_text()
 
     def execute_key_action(
@@ -594,6 +526,12 @@ class MemoryPalaceTUI:
                     self.retriever.inject_into_sidecar(capsule, sidecar_path)
                     sidecar_path_res = str(sidecar_path)
                 capsule_dict = capsule.to_dict() if hasattr(capsule, "to_dict") else capsule
+                if isinstance(capsule_dict, dict):
+                    self.last_capsule = dict(capsule_dict)
+                    self.last_capsule.pop("nodes", None)
+                    self.last_capsule.pop("edges", None)
+                    self.last_capsule.pop("markdown_payload", None)
+                    self.last_capsule["sidecar_path"] = sidecar_path_res
 
             self.status_message = f"Pinned '{identifier or ''}' & prepared capsule"
             return {

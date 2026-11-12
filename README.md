@@ -20,6 +20,17 @@ Resolves [NoJuanNobody/gemini-activity-harvester#3](https://github.com/NoJuanNob
 6. **Interactive Terminal UI Memory Palace (`MemoryPalaceTUI`)**:
    - Live per-model context gauges, compaction alerts (`>= 80%`), knowledge graph explorer, and hotkeys (`[c]` Create, `[r]` Read, `[u]` Update, `[d]` Delete, `[p]` Pin & Inject, `[m]` Refresh Models, `[t]` Time-Travel).
 
+![Context Palace v2 TUI](docs/screenshots/tui_v2.png)
+
+The v2 TUI follows the Context Palace mint/ink design: WINDOWS (model context gauges), LAKE (counts, ingest
+sparkline, dedup watermarks), GRAPH (pinned-first 1-hop tree) and AUDIT (consensus events + last capsule), with
+a `[c][r][u][d][p][m][t][q]` status bar. Preview it on synthetic data without touching your real lake:
+
+```bash
+python scripts/seed_demo_lake.py /tmp/cp_demo.db
+context-palace --db /tmp/cp_demo.db tui
+```
+
 ## Installation & Quickstart
 
 ```bash
@@ -28,10 +39,10 @@ pip install -e .
 # Discover local Antigravity & Claude Code sessions and auto-detect model context windows
 context-palace scan-agents --ingest
 
-# Render the Memory Palace TUI dashboard
-context-palace tui --once
+# Render the Memory Palace TUI dashboard once (Rich; >=160 columns gives the 2x2 grid)
+context-palace tui --once --width 200
 
-# Launch interactive CRUD Memory Palace TUI
+# Launch the interactive Memory Palace TUI (Textual; `--classic` for the old prompt loop)
 context-palace tui
 
 # Resolve context windows for specific models

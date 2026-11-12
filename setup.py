@@ -9,6 +9,7 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "rich>=13.0.0",
+        "textual>=0.80.0",
     ],
     extras_require={
         "dev": ["pytest>=7.0.0"],
