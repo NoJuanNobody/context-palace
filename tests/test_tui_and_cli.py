@@ -376,3 +376,14 @@ def test_cli_models_time_travel_and_inject(
     assert inj_out["status"] == "ok"
     assert capsule_file.exists()
     assert "cache_layer" in capsule_file.read_text(encoding="utf-8")
+
+
+def test_bare_cli_invocation_with_no_args(
+    temp_db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify bare `context-palace` (no subcommand) defaults to TUI without AttributeError."""
+    rc = main(["--db", temp_db])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "CONTEXT PALACE" in out
+    assert "Interactive CRUD Hotkey Bar" in out

@@ -842,16 +842,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = args.subcommand or "tui"
 
     if sub == "tui":
-        if args.once or not sys.stdin.isatty():
+        once_flag = bool(getattr(args, "once", False))
+        as_of_val = getattr(args, "as_of", None)
+        agent_id_val = getattr(args, "agent_id", None)
+        search_val = getattr(args, "search", "")
+        if once_flag or not sys.stdin.isatty():
             out = tui.render_dashboard(
-                as_of=args.as_of,
-                selected_agent_id=args.agent_id,
-                search_query=args.search,
+                as_of=as_of_val,
+                selected_agent_id=agent_id_val,
+                search_query=search_val,
             )
             print(out)
             return 0
-        tui.as_of = args.as_of
-        tui.selected_agent_id = args.agent_id
+        tui.as_of = as_of_val
+        tui.selected_agent_id = agent_id_val
         tui.run_interactive()
         return 0
 

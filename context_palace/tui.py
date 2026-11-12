@@ -334,8 +334,19 @@ class MemoryPalaceTUI:
         nodes, edges, conflicts = self._fetch_concepts_and_edges(
             as_of=effective_as_of, search_query=search_query
         )
+        sorted_nodes = sorted(
+            nodes,
+            key=lambda n: (not bool(n.pinned), -float(n.confidence), -float(n.updated_at)),
+        )
+        max_display_nodes = 20
+        displayed_nodes = sorted_nodes[:max_display_nodes]
+        count_label = (
+            f"Showing {len(displayed_nodes)} of {len(nodes):,} active concepts"
+            if len(nodes) > max_display_nodes
+            else f"{len(nodes):,} active concepts"
+        )
         concepts_table = Table(
-            title="Memory Palace Knowledge Graph (CRUD Table)",
+            title=f"Memory Palace Knowledge Graph (CRUD Table — {count_label})",
             expand=True,
             show_lines=False,
         )
@@ -347,7 +358,7 @@ class MemoryPalaceTUI:
         concepts_table.add_column("Source Agent", style="magenta")
         concepts_table.add_column("Pinned", justify="center")
 
-        if not nodes:
+        if not displayed_nodes:
             concepts_table.add_row(
                 "-",
                 "(no active concepts)",
@@ -358,13 +369,18 @@ class MemoryPalaceTUI:
                 "-",
             )
         else:
-            for node in nodes:
+            for node in displayed_nodes:
                 pin_marker = "PINNED" if node.pinned else "-"
+                val_preview = (
+                    node.active_value[:76] + "..."
+                    if len(node.active_value) > 79
+                    else node.active_value
+                )
                 concepts_table.add_row(
                     node.node_id,
-                    node.canonical_name,
+                    node.canonical_name[:36],
                     node.category,
-                    node.active_value,
+                    val_preview,
                     f"{node.confidence:.2f}",
                     node.source_agent_id,
                     pin_marker,
