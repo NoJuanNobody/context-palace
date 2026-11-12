@@ -991,8 +991,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="subcommand")
 
     # 1. tui
-    p_tui = subparsers.add_parser("tui", help="Launch or render the Memory Palace Rich TUI")
+    p_tui = subparsers.add_parser("tui", help="Launch the Memory Palace TUI (Textual), or render it once (Rich)")
     p_tui.add_argument("--once", action="store_true", help="Render TUI once and exit")
+    p_tui.add_argument("--width", type=int, default=120, help="Columns for --once output (>=160 renders the 2x2 grid)")
+    p_tui.add_argument("--classic", action="store_true", help="Use the legacy print/prompt loop instead of Textual")
     p_tui.add_argument("--as-of", type=float, default=None, help="Time-travel unix timestamp")
     p_tui.add_argument("--search", type=str, default="", help="Filter concepts by query")
     p_tui.add_argument("--agent-id", type=str, default=None, help="Highlight selected agent")
@@ -1155,11 +1157,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 as_of=as_of_val,
                 selected_agent_id=agent_id_val,
                 search_query=search_val,
+                width=int(getattr(args, "width", 120) or 120),
             )
             print(out)
             return 0
         tui.as_of = as_of_val
         tui.selected_agent_id = agent_id_val
+        if not getattr(args, "classic", False):
+            try:
+                from context_palace.tui_app import run_textual_tui
+            except ImportError:
+                run_textual_tui = None  # type: ignore[assignment]
+            if run_textual_tui is not None:
+                run_textual_tui(tui, search_query=search_val or "")
+                return 0
         tui.run_interactive()
         return 0
 

@@ -55,20 +55,22 @@ def test_tui_render_dashboard_shows_model_windows_and_compaction_warnings(temp_d
     )
 
     rendered = tui.render_dashboard(width=140)
-    assert "CONTEXT PALACE — Federated Memory Lake & TUI CRUD Inspector" in rendered
+    assert "Context Palace" in rendered
+    for pane in ("WINDOWS", "LAKE", "GRAPH", "AUDIT"):
+        assert pane in rendered
     assert "LIVE" in rendered
     assert "agy-alpha" in rendered
     assert "gemini-2.5-pro" in rendered
-    assert "25.0%" in rendered
+    assert "25.00%" in rendered
     assert "HEALTHY" in rendered
     assert "claude-beta" in rendered
     assert "claude-sonnet-4" in rendered
-    assert "86.0%" in rendered
+    assert "86.00%" in rendered
     assert "COMPACT NOW" in rendered
     assert "storage_engine" in rendered
     assert "SQLite WAL with bitemporal belief revisions" in rendered
     assert "PINNED" in rendered
-    assert "[c] Create Concept" in rendered
+    assert "[c] Create" in rendered
 
 
 def test_tui_key_action_create_and_read_history(temp_db: str) -> None:
@@ -385,5 +387,5 @@ def test_bare_cli_invocation_with_no_args(
     rc = main(["--db", temp_db])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "CONTEXT PALACE" in out
-    assert "Interactive CRUD Hotkey Bar" in out
+    assert "Context Palace" in out
+    assert "[c] Create" in out

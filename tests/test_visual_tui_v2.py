@@ -115,44 +115,38 @@ def test_visual_tui_v2_three_pane_layout(temp_db: str) -> None:
     tui = MemoryPalaceTUI(lake)
     rendered = tui.render_to_text(width=140)
 
-    # Header
-    assert "CONTEXT PALACE — Federated Memory Lake & TUI CRUD Inspector" in rendered
+    # Header (four-pane v2 design, PR #2)
+    assert "Context Palace" in rendered
     assert "LIVE" in rendered
 
-    # Pane 1: Sessions, Tier distribution, Watermarks
-    assert "Pane 1: AGENT SESSIONS & CONTEXT WINDOWS" in rendered
+    # WINDOWS + LAKE: sessions, tier distribution, watermarks
+    assert "WINDOWS" in rendered
     assert "agent-claude" in rendered
     assert "claude-3-7-sonnet" in rendered
-    assert "[SYNCED] HEALTHY" in rendered
+    assert "( HEALTHY )" in rendered
     assert "agent-gemini" in rendered
     assert "gemini-2.5-pro" in rendered
-    assert "[COMPACT!] COMPACT NOW" in rendered
-    assert "TIER DISTRIBUTION" in rendered
-    assert "HOT" in rendered
-    assert "WARM" in rendered
-    assert "EXTRACTION WATERMARKS" in rendered
-    assert "12,400 bytes" in rendered or "12400" in rendered or "offset=" in rendered
+    assert "COMPACT NOW" in rendered
+    assert "LAKE" in rendered
+    assert "TIERS" in rendered
+    assert "hot 2" in rendered  # pinned topology + conf 0.92 constraint
+    assert "warm 0" in rendered
+    assert "12,400" in rendered and "turn 14" in rendered  # extraction watermark
 
-    # Pane 2: Center graph stream, pills, bitemporal timeline, edges
-    assert "Pane 2: MEMORY PALACE GRAPH STREAM" in rendered
-    assert "Filter: [All]  [Hot]  [Warm]  [Cold]  [History: OFF]" in rendered
-    assert "Bitemporal Timeline: t0" in rendered
-    assert "NOW (LIVE)" in rendered
+    # GRAPH: pinned-first tree with edges
+    assert "GRAPH" in rendered
     assert "federated_memory_topology" in rendered
     assert "CRDT gossip mesh across local agent worktrees" in rendered
     assert "token_compression_target" in rendered
     assert "PINNED" in rendered
     assert "constrains" in rendered
 
-    # Pane 3: Inspector, Live conversation, Controls
-    assert "Pane 3: LIVE CONVERSATION & CONTROLS" in rendered
-    assert "NODE & SUBGRAPH INSPECTOR" in rendered
-    assert "├─► valid_from" in rendered
-    assert "LIVE CONVERSATIONAL ENGINE ([a] Ask / Chat)" in rendered
-    assert "Interactive CRUD Hotkey Bar" in rendered
+    # AUDIT: conversational engine lives here; status bar carries every hotkey
+    assert "AUDIT" in rendered
+    assert "[a] Ask the palace" in rendered
     assert "[c] Create" in rendered
     assert "[l] List All" in rendered
-    assert "[a] Ask/Converse" in rendered
+    assert "[a] Ask" in rendered
 
 
 def test_visual_tui_v2_time_travel_scrubber(temp_db: str) -> None:
@@ -162,7 +156,8 @@ def test_visual_tui_v2_time_travel_scrubber(temp_db: str) -> None:
 
     # Initial LIVE mode
     live_out = tui.render_to_text()
-    assert "NOW (LIVE)" in live_out
+    assert "LIVE" in live_out
+    assert "TIME-TRAVEL" not in live_out
 
     # Activate time travel
     res = tui.execute_key_action("t", {"as_of": 1700000000.0})
@@ -170,7 +165,7 @@ def test_visual_tui_v2_time_travel_scrubber(temp_db: str) -> None:
     assert res["as_of"] == 1700000000.0
 
     past_out = tui.render_to_text()
-    assert "as_of=1700000000.00 [TIME-TRAVEL]" in past_out
+    assert "TIME-TRAVEL as_of=1700000000.00" in past_out
 
 
 # ==============================================================================

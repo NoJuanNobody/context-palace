@@ -661,6 +661,15 @@ def _render_rich_report(inventory: Dict[str, Any]) -> str:
             )
     console.print(nodes_table)
 
+    # Full node contents, outside the table: at 120 columns the 9-column table squeezes the
+    # Content column to a few characters and Rich ellipsizes it, so print every node's
+    # content verbatim (word-wrapped only) to keep the report truly zero-truncation.
+    for n in nodes:
+        content = str(n.get("content", ""))
+        if content:
+            console.print(Text(f"--- content: {n.get('node_id', '')} ---", style="bold cyan"))
+            console.print(Text(content))
+
     # 3. Table: memory_edges
     edges_table = Table(title=f"Memory Edges ({len(edges):,} rows)", expand=True)
     edges_table.add_column("Edge ID", style="bold cyan")

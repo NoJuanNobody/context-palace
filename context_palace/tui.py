@@ -1,9 +1,9 @@
 """
-Rich Terminal User Interface (TUI) for Context Palace.
+Rich / Textual Terminal User Interface (TUI) for Context Palace.
+v2 mint/ink layout: WINDOWS / LAKE / GRAPH / AUDIT panes (see tui_view.py, tui_app.py), plus the
+live conversational engine ([a] Ask) and the full lake inventory ([l] List All).
 Provides full visibility into Connected Local Agents, Auto-Detected Model Context Windows,
 the Bitemporal Knowledge Graph, Relationships & Consensus Audit log, and full CRUD controls.
-Upgraded to FigCraft Visual TUI v2.0 with a 3-pane responsive layout, visual Unicode progress
-bars, bitemporal time-travel scrubber, and live conversational memory engine.
 """
 
 from __future__ import annotations
@@ -118,6 +118,7 @@ from context_palace.models import (
     RelationEdge,
     estimate_tokens,
 )
+
 
 # Graceful optional imports for inventory and conversational engine
 try:
@@ -267,15 +268,14 @@ def _call_compatible(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 class MemoryPalaceTUI:
     """
-    Rich TUI Dashboard & Interactive CRUD Inspector for the Federated Context Lake.
-    FigCraft Visual TUI v2.0: 3-pane layout, Unicode progress bars, bitemporal timeline,
-    subgraph tree inspector, full inventory listing, and live conversational chat engine.
+    Rich/Textual TUI Dashboard & Interactive CRUD Inspector for the Federated Context Lake.
+    Context Palace v2 (mint/ink): WINDOWS / LAKE / GRAPH / AUDIT panes, with the
+    conversational engine ([a] Ask, answers in AUDIT) and full inventory ([l] List All).
     """
 
     HOTKEY_BAR_TEXT = (
-        "[c] Create Concept  [r] Read/History  [u] Update Belief  [d] Delete/Evict  "
-        "[l] List All  [a] Ask/Converse  [p] Pin & Inject Capsule  [m] Refresh Model Windows  "
-        "[t] Time-Travel  [q] Quit"
+        "[c] Create  [r] Read  [u] Update  [d] Delete  [l] List All  [a] Ask  "
+        "[p] Pin & Inject  [m] Models  [t] Time-Travel  [q] Quit"
     )
 
     def __init__(
@@ -292,6 +292,8 @@ class MemoryPalaceTUI:
         self.selected_node_id: Optional[str] = None
         self.status_message: str = "Ready"
         self.chat_history: List[Dict[str, Any]] = []
+        self.last_capsule: Optional[Dict[str, Any]] = None
+        self.last_output: List[str] = []
 
     def _fetch_agent_sessions(self) -> List[AgentSession]:
         if hasattr(self.lake, "list_agent_sessions"):
@@ -386,325 +388,84 @@ class MemoryPalaceTUI:
 
         return nodes, edges, conflicts
 
-    def _build_left_pane(
+    def collect_dashboard_data(
         self,
-        sessions: List[AgentSession],
-        nodes: List[ConceptNode],
-    ) -> Panel:
-        """
-        Build Left Pane:
-        - AGENT SESSIONS & CONTEXT WINDOWS with Unicode progress bars (█/░), token ratios,
-          adaptive capsule budgets, and [SYNCED] / [COMPACT!] badges.
-        - TIER DISTRIBUTION (HOT, WARM, COLD, SUPERSEDED) with mini-bars and counts.
-        - EXTRACTION WATERMARKS with byte offsets and status.
-        """
-        # 1. Sessions Table
-        agents_table = Table(
-            title="Connected Local Agents & Auto-Detected Model Context Windows",
-            expand=True,
-            show_lines=False,
-        )
-        agents_table.add_column("Agent ID", style="bold white", no_wrap=True)
-        agents_table.add_column("Harness", style="cyan")
-        agents_table.add_column("Auto-Detected Model", style="magenta")
-        agents_table.add_column("Context Usage (Used / Max)", justify="right")
-        agents_table.add_column("Utilization %", justify="right")
-        agents_table.add_column("Free Headroom", justify="right")
-        agents_table.add_column("Adaptive Capsule Budget", justify="right")
-        agents_table.add_column("Status", justify="center")
-
-        if not sessions:
-            agents_table.add_row(
-                "(no agents registered)",
-                "-",
-                "-",
-                "0 / 0",
-                "0.0%",
-                "0",
-                "0",
-                "IDLE",
-            )
-        else:
-            for sess in sessions:
-                ratio = sess.used_tokens / max(1, sess.max_context_tokens)
-                bar = render_unicode_bar(ratio, width=10)
-                status_label = "[COMPACT!] COMPACT NOW" if sess.needs_compaction else "[SYNCED] HEALTHY"
-                status_style = "bold red" if sess.needs_compaction else "bold green"
-                agents_table.add_row(
-                    sess.agent_id,
-                    sess.harness_type,
-                    sess.model_id,
-                    f"{sess.used_tokens:,} / {sess.max_context_tokens:,}",
-                    f"{sess.utilization_pct:.1f}% {bar}",
-                    f"{sess.remaining_headroom:,}",
-                    f"{sess.adaptive_capsule_budget():,}",
-                    Text(status_label, style=status_style),
-                )
-
-        # 2. Tier Distribution
-        active_nodes = [n for n in nodes if not n.tombstoned]
-        total_active = max(1, len(active_nodes))
-        hot_count = sum(1 for n in active_nodes if n.pinned or n.confidence >= 0.85)
-        warm_count = sum(1 for n in active_nodes if not n.pinned and 0.50 <= n.confidence < 0.85)
-        cold_count = sum(1 for n in active_nodes if not n.pinned and n.confidence < 0.50)
-        super_count = sum(1 for n in nodes if n.tombstoned)
-
-        tier_lines = [
-            f"HOT        (pinned / conf >= 0.85): {render_unicode_bar(hot_count / total_active, width=12)}  {hot_count:,} nodes",
-            f"WARM       (0.50 <= conf < 0.85):  {render_unicode_bar(warm_count / total_active, width=12)}  {warm_count:,} nodes",
-            f"COLD       (conf < 0.50):          {render_unicode_bar(cold_count / total_active, width=12)}  {cold_count:,} nodes",
-            f"SUPERSEDED (tombstoned/history):   {render_unicode_bar(super_count / max(1, len(nodes)), width=12)}  {super_count:,} nodes",
-        ]
-        tier_panel = Panel(
-            "\n".join(tier_lines),
-            title="TIER DISTRIBUTION",
-            border_style="blue",
-        )
-
-        # 3. Extraction Watermarks
-        wm_lines: List[str] = []
-        if sessions:
-            for s in sessions:
-                wm_lines.append(
-                    f"• {s.agent_id} [{s.model_id}]: offset={s.last_byte_offset:,} bytes | turn={s.last_processed_turn} | [SYNCED]"
-                )
-        else:
-            wm_lines.append("(no active extraction watermarks)")
-
-        watermark_panel = Panel(
-            "\n".join(wm_lines),
-            title="EXTRACTION WATERMARKS",
-            border_style="cyan",
-        )
-
-        return Panel(
-            Group(agents_table, tier_panel, watermark_panel),
-            title="Pane 1: AGENT SESSIONS & CONTEXT WINDOWS",
-            border_style="cyan",
-        )
-
-    def _build_center_pane(
-        self,
-        nodes: List[ConceptNode],
-        edges: List[RelationEdge],
-        conflicts: List[ConflictResolutionEvent],
-        effective_as_of: Optional[float],
-        search_query: str,
-    ) -> Panel:
-        """
-        Build Center Pane:
-        - Filter pills ([All], [Hot], [Warm], [Cold], [History: ON/OFF])
-        - Bitemporal Time-Travel Scrubber strip (t0 ──────●── NOW (LIVE) or historical as_of)
-        - Memory Palace Knowledge Graph & Graph Stream cards with 1-hop edge provenance.
-        """
-        # Filter pills
-        filter_pills = (
-            "Filter: [All]  [Hot]  [Warm]  [Cold]  [History: OFF]"
-            + (f" | Search: '{search_query}'" if search_query else "")
-        )
-
-        # Bitemporal Time-Travel Scrubber
-        if effective_as_of is None:
-            scrubber = "Bitemporal Timeline: t0 ────────────────────────────────────────● NOW (LIVE)"
-        else:
-            scrubber = f"Bitemporal Timeline: t0 ────────────────●─────────────────────── NOW (as_of={effective_as_of:.2f} [TIME-TRAVEL])"
-
-        sorted_nodes = sorted(
-            nodes,
-            key=lambda n: (not bool(n.pinned), -float(n.confidence), -float(n.updated_at)),
-        )
-        max_display_nodes = 20
-        displayed_nodes = sorted_nodes[:max_display_nodes]
-        count_label = (
-            f"Showing {len(displayed_nodes)} of {len(nodes):,} active concepts"
-            if len(nodes) > max_display_nodes
-            else f"{len(nodes):,} active concepts"
-        )
-
-        concepts_table = Table(
-            title=f"Memory Palace Knowledge Graph (CRUD Table — {count_label})",
-            expand=True,
-            show_lines=False,
-        )
-        concepts_table.add_column("Node ID", style="dim", no_wrap=True)
-        concepts_table.add_column("Canonical Concept", style="bold yellow")
-        concepts_table.add_column("Category", style="cyan")
-        concepts_table.add_column("Active Belief Value", style="white")
-        concepts_table.add_column("Confidence", justify="right")
-        concepts_table.add_column("Source Agent", style="magenta")
-        concepts_table.add_column("Pinned", justify="center")
-
-        if not displayed_nodes:
-            concepts_table.add_row(
-                "-",
-                "(no active concepts)",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-            )
-        else:
-            for node in displayed_nodes:
-                pin_marker = "PINNED" if node.pinned else "-"
-                val_preview = (
-                    node.active_value[:76] + "..."
-                    if len(node.active_value) > 79
-                    else node.active_value
-                )
-                concepts_table.add_row(
-                    node.node_id,
-                    node.canonical_name[:36],
-                    node.category,
-                    val_preview,
-                    f"{node.confidence:.2f}",
-                    node.source_agent_id,
-                    pin_marker,
-                )
-
-        # Relationships & Consensus Audit Panel
-        node_name_by_id = {n.node_id: n.canonical_name for n in nodes}
-        rel_lines: List[str] = []
-        if edges:
-            for edge in edges[:12]:
-                src_label = node_name_by_id.get(edge.source_id, edge.source_id)
-                dst_label = node_name_by_id.get(edge.target_id, edge.target_id)
-                rel_lines.append(
-                    f"Edge: {src_label} ──[{edge.relation_type}]──► {dst_label} (w={edge.weight:.2f}, via {edge.source_agent_id})"
-                )
-        else:
-            rel_lines.append("Edges: (no active relation edges)")
-
-        if conflicts:
-            for ev in conflicts[:8]:
-                rel_lines.append(
-                    f"Conflict Audit [{ev.event_id}]: node={ev.node_id} winner={ev.winning_agent_id} "
-                    f"({ev.winning_score:.2f}) over {ev.losing_agent_id} ({ev.losing_score:.2f}) — {ev.reason}"
-                )
-        else:
-            rel_lines.append("Consensus Audit: 0 unresolved conflicts")
-
-        audit_panel = Panel(
-            "\n".join(rel_lines),
-            title="Relationships & Consensus Audit Panel",
-            border_style="magenta",
-        )
-
-        return Panel(
-            Group(
-                Text(filter_pills, style="bold cyan"),
-                Text(scrubber, style="bold green" if effective_as_of is None else "bold yellow"),
-                concepts_table,
-                audit_panel,
-            ),
-            title="Pane 2: MEMORY PALACE GRAPH STREAM",
-            border_style="yellow",
-        )
-
-    def _build_right_pane(
-        self,
-        nodes: List[ConceptNode],
-        edges: List[RelationEdge],
-    ) -> Panel:
-        """
-        Build Right Pane:
-        - Top: NODE & SUBGRAPH INSPECTOR with visual Unicode tree (├─►, └─►).
-        - Middle: LIVE CONVERSATIONAL ENGINE ([a] Ask / Chat) showing recent turns and cited nodes.
-        - Bottom: CRUD & INVENTORY CONTROLS hotkey guide.
-        """
-        # 1. Selected Node & Subgraph Inspector
-        target_node = None
-        if self.selected_node_id:
-            for n in nodes:
-                if n.node_id == self.selected_node_id or n.canonical_name == self.selected_node_id:
-                    target_node = n
-                    break
-        if target_node is None and nodes:
-            target_node = nodes[0]
-
-        tree_lines: List[str] = []
-        if target_node:
-            tree_lines.append(f"Concept: [bold yellow]{target_node.canonical_name}[/bold yellow] ({target_node.node_id})")
-            tree_lines.append(f"Category: {target_node.category} | Confidence: {target_node.confidence:.2f}")
-            tree_lines.append(f"├─► valid_from:    {target_node.created_at:.2f}")
-            tree_lines.append(f"├─► valid_until:   None (Active Belief)")
-            tree_lines.append(f"├─► recorded_at:   {target_node.updated_at:.2f}")
-            tree_lines.append(f"├─► superseded_by: None")
-
-            incident_edges = [
-                e for e in edges if e.source_id == target_node.node_id or e.target_id == target_node.node_id
-            ]
-            if incident_edges:
-                for idx, edge in enumerate(incident_edges[:4]):
-                    prefix = "└─►" if idx == len(incident_edges[:4]) - 1 else "├─►"
-                    direction = "──►" if edge.source_id == target_node.node_id else "◄──"
-                    other = edge.target_id if edge.source_id == target_node.node_id else edge.source_id
-                    tree_lines.append(f"{prefix} edge [{edge.relation_type}] {direction} {other} (w={edge.weight:.2f})")
-            else:
-                tree_lines.append("└─► edges: (no incident edges)")
-        else:
-            tree_lines.append("Node Inspector: (no concepts in lake)")
-
-        inspector_panel = Panel(
-            "\n".join(tree_lines),
-            title="NODE & SUBGRAPH INSPECTOR",
-            border_style="magenta",
-        )
-
-        # 2. Live Conversational Engine
-        chat_lines: List[str] = []
-        if self.chat_history:
-            for turn in self.chat_history[-3:]:
-                chat_lines.append(f"You:    {turn.get('user', '')}")
-                chat_lines.append(f"Palace: {turn.get('palace', '')}")
-                cited = turn.get("cited_nodes") or []
-                if cited:
-                    chat_lines.append(f"        └─► cited: {', '.join(cited)}")
-                chat_lines.append("")
-        else:
-            chat_lines.append("Palace: Ready. Press [a] to ask a question or chat with Context Palace.")
-            chat_lines.append("Supports natural-language queries, bitemporal time-travel, and CRUD:")
-            chat_lines.append("  • 'What do my agents know about federated memory?'")
-            chat_lines.append("  • 'Remember port is 8443'")
-            chat_lines.append("  • 'Forget legacy_cache'")
-
-        chat_panel = Panel(
-            "\n".join(chat_lines).strip(),
-            title="LIVE CONVERSATIONAL ENGINE ([a] Ask / Chat)",
-            border_style="green",
-        )
-
-        # 3. CRUD & Inventory Controls Hotkey Panel
-        controls_text = (
-            "[c] Create  [r] Read  [u] Update  [d] Delete  [l] List All  [a] Ask/Converse  "
-            "[t] Time-Travel  [s] Search  [w] Windows  [p] Capsule  [q] Quit\n\n"
-            + self.HOTKEY_BAR_TEXT
-        )
-        controls_panel = Panel(
-            Text(controls_text, style="bold white"),
-            title="Interactive CRUD Hotkey Bar",
-            border_style="green",
-        )
-
-        return Panel(
-            Group(inspector_panel, chat_panel, controls_panel),
-            title="Pane 3: LIVE CONVERSATION & CONTROLS",
-            border_style="green",
-        )
-
-    def render_to_text(
-        self,
-        width: int = 140,
         as_of: Optional[float] = None,
         selected_agent_id: Optional[str] = None,
         search_query: str = "",
-    ) -> str:
-        """Render the complete 3-pane Visual TUI v2.0 dashboard to text."""
-        return self.render_dashboard(
-            as_of=as_of,
-            selected_agent_id=selected_agent_id,
+        frontend: str = "rich",
+        size: Optional[tuple] = None,
+    ) -> "DashboardData":
+        """
+        Gather live data for the WINDOWS / LAKE / GRAPH / AUDIT panes from the lake,
+        consensus weights and the last pushed capsule.
+        """
+        import time as _time
+
+        from context_palace.consensus import PROVENANCE_WEIGHTS
+        from context_palace.tui_view import DashboardData
+
+        effective_as_of = as_of if as_of is not None else self.as_of
+        effective_agent = selected_agent_id if selected_agent_id is not None else self.selected_agent_id
+
+        sessions = self._fetch_agent_sessions()
+        nodes, edges, conflicts = self._fetch_concepts_and_edges(
+            as_of=effective_as_of, search_query=search_query
+        )
+
+        # Provenance per node = provenance_type of its active (or latest as-of) revision.
+        node_prov: Dict[str, str] = {}
+        rev_prov: Dict[str, str] = {}
+        if hasattr(self.lake, "get_belief_history"):
+            wanted = {n.node_id for n in nodes}
+            wanted.update(c.node_id for c in conflicts)
+            for nid in wanted:
+                try:
+                    history = list(self.lake.get_belief_history(nid))
+                except Exception:
+                    continue
+                for rev in history:
+                    rev_prov[rev.revision_id] = rev.provenance_type
+                visible = [
+                    r
+                    for r in history
+                    if effective_as_of is None
+                    or (r.valid_from <= effective_as_of and (r.valid_to is None or r.valid_to > effective_as_of))
+                ]
+                active = [r for r in visible if effective_as_of is not None or r.valid_to is None] or visible
+                if active:
+                    node_prov[nid] = active[-1].provenance_type
+
+        rev_count: Optional[int] = None
+        rev_ts: List[float] = []
+        if hasattr(self.lake, "list_revision_timestamps"):
+            try:
+                rev_ts = list(self.lake.list_revision_timestamps())
+                rev_count = len(rev_ts)
+            except Exception:
+                rev_ts = []
+
+        return DashboardData(
+            now=_time.time(),
+            as_of=effective_as_of,
+            db_path=str(getattr(self.lake, "db_path", ":memory:")),
+            status_message=self.status_message,
             search_query=search_query,
-            width=width,
+            selected_agent_id=effective_agent,
+            sessions=sessions,
+            nodes=nodes,
+            edges=edges,
+            conflicts=conflicts,
+            node_provenance=node_prov,
+            revision_provenance=rev_prov,
+            revision_count=rev_count,
+            revision_timestamps=rev_ts,
+            provenance_weights=dict(PROVENANCE_WEIGHTS),
+            last_capsule=self.last_capsule,
+            last_output=list(self.last_output),
+            chat_history=list(self.chat_history),
+            frontend=frontend,
+            size=size,
         )
 
     def render_dashboard(
@@ -715,52 +476,44 @@ class MemoryPalaceTUI:
         width: int = 120,
     ) -> str:
         """
-        Render the complete FigCraft Visual TUI v2.0 Dashboard into a formatted string.
+        Render the v2 Memory Palace TUI (header, WINDOWS / LAKE / GRAPH / AUDIT panes,
+        hotkey status bar) into a plain-text string. Below 160 columns the 2x2 grid
+        stacks into a single column so the WINDOWS table keeps all of its columns.
         """
-        effective_as_of = as_of if as_of is not None else self.as_of
-        effective_agent = selected_agent_id if selected_agent_id is not None else self.selected_agent_id
+        from rich.console import Console as RichConsole
 
-        console = Console(record=True, width=width, force_terminal=False)
+        from context_palace.tui_view import build_dashboard
 
-        # 1. Header Banner
-        mode_str = (
-            f"TIME-TRAVEL as_of={effective_as_of:.2f}"
-            if effective_as_of is not None
-            else "LIVE"
+        data = self.collect_dashboard_data(
+            as_of=as_of,
+            selected_agent_id=selected_agent_id,
+            search_query=search_query,
+            frontend="rich",
+            size=(width, 0),
         )
-        header_text = Text(
-            f"CONTEXT PALACE — Federated Memory Lake & TUI CRUD Inspector  [{mode_str}]",
-            style="bold cyan",
-        )
-        sub_line = Text(
-            f"Status: {self.status_message}"
-            + (f" | Selected Agent: {effective_agent}" if effective_agent else "")
-            + (f" | Filter: '{search_query}'" if search_query else ""),
-            style="dim",
-        )
-        header_panel = Panel(
-            Group(header_text, sub_line),
-            border_style="bright_blue",
-            title="Memory Palace Control Plane",
-        )
+        data.size = None
+        import io
 
-        # Fetch live data
-        sessions = self._fetch_agent_sessions()
-        nodes, edges, conflicts = self._fetch_concepts_and_edges(
-            as_of=effective_as_of, search_query=search_query
+        console = RichConsole(
+            record=True, width=width, force_terminal=False, color_system=None, file=io.StringIO()
         )
-
-        # Build 3 Panes
-        left_pane = self._build_left_pane(sessions, nodes)
-        center_pane = self._build_center_pane(nodes, edges, conflicts, effective_as_of, search_query)
-        right_pane = self._build_right_pane(nodes, edges)
-
-        console.print(header_panel)
-        console.print(left_pane)
-        console.print(center_pane)
-        console.print(right_pane)
-
+        console.print(build_dashboard(data, width=width))
         return console.export_text()
+
+    def render_to_text(
+        self,
+        width: int = 140,
+        as_of: Optional[float] = None,
+        selected_agent_id: Optional[str] = None,
+        search_query: str = "",
+    ) -> str:
+        """Render the complete four-pane v2 TUI dashboard to text."""
+        return self.render_dashboard(
+            as_of=as_of,
+            selected_agent_id=selected_agent_id,
+            search_query=search_query,
+            width=width,
+        )
 
     def handle_command(self, cmd: str) -> Dict[str, Any]:
         """
@@ -784,6 +537,7 @@ class MemoryPalaceTUI:
             m_count = len(edges)
             k_count = len(sessions)
             self.status_message = f"Listed all {n_count} nodes, {m_count} edges, {k_count} sessions"
+            self.last_output = [f"palace$ l  → {n_count} nodes · {m_count} edges · {k_count} sessions"]
             return {
                 "status": "ok",
                 "action": "list-all",
@@ -1034,6 +788,12 @@ class MemoryPalaceTUI:
                     self.retriever.inject_into_sidecar(capsule, sidecar_path)
                     sidecar_path_res = str(sidecar_path)
                 capsule_dict = capsule.to_dict() if hasattr(capsule, "to_dict") else capsule
+                if isinstance(capsule_dict, dict):
+                    self.last_capsule = dict(capsule_dict)
+                    self.last_capsule.pop("nodes", None)
+                    self.last_capsule.pop("edges", None)
+                    self.last_capsule.pop("markdown_payload", None)
+                    self.last_capsule["sidecar_path"] = sidecar_path_res
 
             self.status_message = f"Pinned '{identifier or ''}' & prepared capsule"
             return {

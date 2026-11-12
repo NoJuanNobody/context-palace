@@ -571,6 +571,18 @@ class ContextLake:
         ).fetchall()
         return [self._row_to_revision(r) for r in rows]
 
+    def list_revision_timestamps(self, since: Optional[float] = None) -> List[float]:
+        """Return ``valid_from`` of every BeliefRevision (optionally since a timestamp), ascending.
+        Used by the TUI LAKE pane for the revision count and ingest sparkline."""
+        if since is None:
+            rows = self._conn.execute("SELECT valid_from FROM belief_revisions ORDER BY valid_from ASC").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT valid_from FROM belief_revisions WHERE valid_from >= ? ORDER BY valid_from ASC",
+                (float(since),),
+            ).fetchall()
+        return [float(r[0]) for r in rows]
+
     def record_belief_revision(self, revision: BeliefRevision) -> None:
         self._conn.execute(
             """
