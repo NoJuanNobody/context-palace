@@ -897,7 +897,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "qwen2.5-coder:7b",
         ]
         specs = [
-            registry.resolve_model_window(mid, allow_live_probe=args.live).to_dict()
+            _call_compatible(
+                registry.resolve_model_window,
+                model_id=mid,
+                fetch_live=args.live,
+                allow_live_probe=args.live,
+            ).to_dict()
             for mid in model_ids
         ]
         print(json.dumps({"status": "ok", "models": specs}, indent=2))
@@ -969,18 +974,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
     if sub == "inject":
+        session_obj = lake.get_agent_session(args.agent_id) if hasattr(lake, "get_agent_session") else None
+        if session_obj is None:
+            session_obj = AgentSession(
+                agent_id=args.agent_id,
+                harness_type="antigravity",
+                model_id="gemini-4-argon",
+                max_context_tokens=1_000_000,
+                used_tokens=50_000,
+            )
         capsule = _call_compatible(
             retriever.build_context_capsule,
+            session=session_obj,
+            task_query=args.query,
             agent_id=args.agent_id,
             query=args.query,
         )
         if args.output and hasattr(retriever, "inject_into_sidecar"):
-            out_path = retriever.inject_into_sidecar(capsule, args.output)
+            retriever.inject_into_sidecar(capsule, args.output)
             print(
                 json.dumps(
                     {
                         "status": "ok",
-                        "output_path": str(out_path),
+                        "output_path": str(args.output),
                         "capsule": capsule.to_dict(),
                     },
                     indent=2,
@@ -1002,7 +1018,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 continue
             try:
                 req = json.loads(line_str)
-                if mcp_server is not None and hasattr(mcp_server, "handle_rpc"):
+                if mcp_server is not None and hasattr(mcp_server, "handle_jsonrpc"):
+                    resp = mcp_server.handle_jsonrpc(req)
+                elif mcp_server is not None and hasattr(mcp_server, "handle_rpc"):
                     resp = mcp_server.handle_rpc(req)
                 else:
                     resp = {

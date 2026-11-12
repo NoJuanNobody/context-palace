@@ -555,16 +555,28 @@ class MemoryPalaceTUI:
             sidecar_path = payload.get("sidecar_path")
 
             if self.retriever is not None and target_agent_id:
+                session_obj = None
+                if hasattr(self.lake, "get_agent_session"):
+                    session_obj = self.lake.get_agent_session(target_agent_id)
+                if session_obj is None:
+                    session_obj = AgentSession(
+                        agent_id=target_agent_id,
+                        harness_type="antigravity",
+                        model_id="gemini-4-argon",
+                        max_context_tokens=1_000_000,
+                        used_tokens=50_000,
+                    )
                 capsule = _call_compatible(
                     self.retriever.build_context_capsule,
+                    session=session_obj,
+                    task_query=query,
                     agent_id=target_agent_id,
                     query=query,
                     as_of=self.as_of,
                 )
                 if sidecar_path and hasattr(self.retriever, "inject_into_sidecar"):
-                    sidecar_path_res = str(
-                        self.retriever.inject_into_sidecar(capsule, sidecar_path)
-                    )
+                    self.retriever.inject_into_sidecar(capsule, sidecar_path)
+                    sidecar_path_res = str(sidecar_path)
                 capsule_dict = capsule.to_dict() if hasattr(capsule, "to_dict") else capsule
 
             self.status_message = f"Pinned '{identifier or ''}' & prepared capsule"
@@ -605,7 +617,14 @@ class MemoryPalaceTUI:
             self.as_of = float(payload["as_of"]) if payload.get("as_of") is not None else None
             snap: Dict[str, Any] = {}
             if hasattr(self.lake, "snapshot"):
-                snap = _call_compatible(self.lake.snapshot, as_of=self.as_of)
+                raw_snap = _call_compatible(self.lake.snapshot, as_of=self.as_of)
+                if isinstance(raw_snap, dict):
+                    snap = {
+                        k: [item.to_dict() if hasattr(item, "to_dict") else item for item in v]
+                        if isinstance(v, list)
+                        else v
+                        for k, v in raw_snap.items()
+                    }
             mode = f"as_of={self.as_of}" if self.as_of is not None else "LIVE"
             self.status_message = f"Time-travel set to {mode}"
             return {
