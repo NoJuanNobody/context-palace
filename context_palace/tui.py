@@ -875,18 +875,13 @@ class MemoryPalaceTUI:
                 limit = int(payload.get("limit", 10))
                 if search_dirs is None:
                     try:
-                        from context_palace.model_registry import sync_live_agent_sessions
+                        from context_palace.model_registry import ModelContextRegistry, sync_live_agent_sessions
 
-                        discovered = sync_live_agent_sessions(self.lake, self.registry)
+                        if isinstance(self.registry, ModelContextRegistry):
+                            discovered = sync_live_agent_sessions(self.lake, self.registry)
                     except Exception:
-                        discovered = list(
-                            _call_compatible(
-                                self.registry.discover_local_agents,
-                                search_dirs=search_dirs,
-                                limit=limit,
-                            )
-                        )
-                else:
+                        discovered = []
+                if not discovered:
                     discovered = list(
                         _call_compatible(
                             self.registry.discover_local_agents,

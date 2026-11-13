@@ -1011,6 +1011,8 @@ class InventoryScreen(ModalScreen[None]):
 class DragDropCard(Static):
     """Draggable / Droppable card widget inside DragDropStudioScreen."""
 
+    allow_select = False
+
     def __init__(
         self,
         renderable: Any = "",
@@ -1020,9 +1022,22 @@ class DragDropCard(Static):
         **kwargs: Any,
     ) -> None:
         super().__init__(renderable, **kwargs)
-        self.dnd_kind = dnd_kind  # "concept", "window", or "lake_dropzone"
+        self.dnd_kind = dnd_kind  # "concept", "window", "lake_dropzone", or "static"
         self.dnd_id = dnd_id
         self.dnd_label = dnd_label
+
+    def set_card(
+        self,
+        renderable: Any,
+        dnd_kind: str = "",
+        dnd_id: str = "",
+        dnd_label: str = "",
+    ) -> None:
+        self.dnd_kind = dnd_kind
+        self.dnd_id = dnd_id
+        self.dnd_label = dnd_label
+        self.display = True
+        self.update(renderable)
 
 
 class DragDropStudioScreen(ModalScreen[None]):
@@ -1033,6 +1048,8 @@ class DragDropStudioScreen(ModalScreen[None]):
     Supports both continuous mouse drag-and-drop (press -> move -> release) and click-to-transfer,
     with 3-5 word summaries on every card.
     """
+
+    allow_select = False
 
     BINDINGS = [
         Binding("escape", "close", "Close", show=False),
@@ -1136,6 +1153,35 @@ class DragDropStudioScreen(ModalScreen[None]):
             Panel(txt, box=box.ROUNDED, border_style=th.s_strong if self.drag_state else th.s_28, padding=(0, 1))
         )
 
+    def _sync_card_list(
+        self,
+        container: Vertical,
+        specs: List[Tuple[Any, str, str, str]],
+    ) -> None:
+        """
+        Update existing DragDropCard children in-place without ever calling .remove().
+        This guarantees no detached widget with `parent is None` can ever be hit by Textual's MouseDown dispatcher.
+        """
+        existing = [c for c in container.children if isinstance(c, DragDropCard)]
+        for i, (renderable, kind, cid, label) in enumerate(specs):
+            if i < len(existing):
+                existing[i].set_card(renderable, dnd_kind=kind, dnd_id=cid, dnd_label=label)
+            else:
+                container.mount(
+                    DragDropCard(
+                        renderable,
+                        dnd_kind=kind,
+                        dnd_id=cid,
+                        dnd_label=label,
+                        classes="dnd-card",
+                    )
+                )
+        for j in range(len(specs), len(existing)):
+            existing[j].dnd_kind = ""
+            existing[j].dnd_id = ""
+            existing[j].dnd_label = ""
+            existing[j].display = False
+
     def _render_studio(self) -> None:
         from rich import box
         from rich.panel import Panel
@@ -1174,10 +1220,9 @@ class DragDropStudioScreen(ModalScreen[None]):
             for cname in (meta.get("injected_concepts") or []):
                 concept_to_windows.setdefault(cname, []).append(s.agent_id)
 
-        # Rebuild Left Column: Centralized SQLite Lake
+        # Build Left Column Specs: Centralized SQLite Lake
         lake_container = self.query_one("#dnd-lake-cards", Vertical)
-        for child in list(lake_container.children):
-            child.remove()
+        lake_specs: List[Tuple[Any, str, str, str]] = []
 
         lake_drop_txt = Text()
         lake_drop_txt.append(
@@ -1188,13 +1233,12 @@ class DragDropStudioScreen(ModalScreen[None]):
             "[ ⬇ DROP LIVE WINDOW CONTEXT HERE TO SAVE INTO CENTRALIZED SQLITE DB ]",
             style=_modal_click(th.s_pill_on if (self.drag_state and self.drag_state.get("kind") == "window") else th.s_strong, "drop_on_lake"),
         )
-        lake_container.mount(
-            DragDropCard(
+        lake_specs.append(
+            (
                 Panel(lake_drop_txt, box=box.ROUNDED, border_style=th.s_45, padding=(0, 1)),
-                dnd_kind="lake_dropzone",
-                dnd_id="sqlite_lake",
-                dnd_label="Centralized SQLite Lake",
-                classes="dnd-card",
+                "lake_dropzone",
+                "sqlite_lake",
+                "Centralized SQLite Lake",
             )
         )
 
@@ -1230,35 +1274,31 @@ class DragDropStudioScreen(ModalScreen[None]):
                 border_style=th.s_strong if (self.drag_state and self.drag_state.get("id") == cname) else th.s_28,
                 padding=(0, 1),
             )
-            lake_container.mount(
-                DragDropCard(
-                    card_panel,
-                    dnd_kind="concept",
-                    dnd_id=cname,
-                    dnd_label=short_topic,
-                    classes="dnd-card",
-                )
-            )
+            lake_specs.append((card_panel, "concept", cname, short_topic))
 
-        # Rebuild Right Column: Actual Open Context Windows
+        self._sync_card_list(lake_container, lake_specs)
+
+        # Build Right Column Specs: Actual Open Context Windows
         win_container = self.query_one("#dnd-windows-cards", Vertical)
-        for child in list(win_container.children):
-            child.remove()
+        win_specs: List[Tuple[Any, str, str, str]] = []
 
         win_hdr = Text(
             f"2. ACTUAL OPEN CONTEXT WINDOWS ({len(sessions)} Live Running Terminal Sessions · Closed Windows Pruned)",
             style=th.s_strong,
         )
-        win_container.mount(Static(win_hdr, classes="dnd-card"))
+        win_specs.append((win_hdr, "static", "windows_header", "Open Windows Header"))
 
         if not sessions:
-            win_container.mount(
-                Static(
+            win_specs.append(
+                (
                     Panel(
                         Text("(0 open agent sessions detected — launch `agy` or `claude` in a terminal)"),
                         box=box.ROUNDED,
                         border_style=th.s_28,
-                    )
+                    ),
+                    "static",
+                    "windows_empty",
+                    "Empty Windows",
                 )
             )
         node_by_cname = {n.canonical_name: n for n in nodes}
@@ -1321,15 +1361,9 @@ class DragDropStudioScreen(ModalScreen[None]):
                 border_style=th.s_strong if (self.drag_state and self.drag_state.get("kind") == "concept") else th.s_45,
                 padding=(0, 1),
             )
-            win_container.mount(
-                DragDropCard(
-                    w_panel,
-                    dnd_kind="window",
-                    dnd_id=aid,
-                    dnd_label=topic_3_5w,
-                    classes="dnd-card",
-                )
-            )
+            win_specs.append((w_panel, "window", aid, topic_3_5w))
+
+        self._sync_card_list(win_container, win_specs)
 
     def _find_dnd_card_at(self, screen_x: int, screen_y: int) -> Optional[DragDropCard]:
         try:
@@ -1469,6 +1503,7 @@ class ContextPalaceApp(App[None]):
 
     TITLE = "Context Palace"
     REFRESH_SECONDS = 5.0
+    ALLOW_SELECT = False
 
     CSS = f"""
     Screen {{

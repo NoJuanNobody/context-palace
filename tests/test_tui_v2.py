@@ -591,6 +591,17 @@ def test_drag_drop_context_studio_and_closed_session_pruning(demo: dict, tmp_pat
         assert "database_engine" not in lake.get_agent_session("antigravity-3ad38af4").metadata.get("injected_concepts", [])
         assert lake.get_concept("database_engine") is not None
 
+        # Regression test: real MouseDown / click on DragDropCard after multiple _render_studio() calls
+        from context_palace.tui_app import DragDropCard
+
+        cards = list(app.screen.query(DragDropCard))
+        assert len(cards) >= 2
+        for card in cards[:3]:
+            if card.display:
+                assert card.parent is not None
+                await pilot.click(card)
+                await pilot.pause()
+
         app.screen.action_close()
         await pilot.pause()
 
