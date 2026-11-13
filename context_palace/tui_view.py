@@ -453,7 +453,15 @@ def build_windows_pane(data: DashboardData) -> Group:
         name_base = th.s_strong if aid == data.selected_agent_id else th.s_ink
         agent_line = Text(aid, style=_click(name_base, "manage_agent", aid))
         topic_line = Text(f"↳ {topic_3_5w}", style=_click(th.s_60, "manage_agent", aid))
-        agent_cell: Any = Group(agent_line, topic_line)
+        dnd_line = Text()
+        dnd_line.append("[⬇ Drop]", style=_click(th.s_strong, "drop_on_window", aid))
+        dnd_line.append(" ", style=th.s_45)
+        dnd_line.append("[⬆ To Lake]", style=_click(th.s_60, "drag_window_to_lake", aid))
+        meta = sess.metadata if isinstance(getattr(sess, "metadata", None), dict) else {}
+        injected_list = meta.get("injected_concepts") if isinstance(meta.get("injected_concepts"), list) else []
+        if injected_list:
+            dnd_line.append(f" ({len(injected_list)} in window)", style=_click(th.s_strong, "open_drag_drop_studio"))
+        agent_cell: Any = Group(agent_line, topic_line, dnd_line)
 
         used = Text(f"{sess.used_tokens:,} / {sess.max_context_tokens:,}", style=_click(th.s_ink, "manage_agent", aid))
         bar = usage_bar(sess.used_tokens, sess.max_context_tokens, theme=th)
@@ -469,13 +477,16 @@ def build_windows_pane(data: DashboardData) -> Group:
         )
 
     hint = Text()
+    hint.append("[⇄ Drag & Drop Studio (w)]", style=_click(th.s_pill_on, "open_drag_drop_studio"))
+    hint.append(" · ", style=th.s_45)
     hint.append("[+ agent]", style=_click(th.s_strong, "manage_agent", ""))
     hint.append(" · ", style=th.s_45)
-    hint.append("[m] refresh model windows", style=_click(th.s_45, "models"))
+    hint.append("[m] sync live windows", style=_click(th.s_45, "models"))
 
-    note = Text("Click any agent row to edit/delete session · click ", style=th.s_45)
+    note = Text("Only live open sessions shown · Drag SQLite concepts to [⬇ Drop] or open ", style=th.s_45)
+    note.append("[⇄ Drag & Drop Studio]", style=_click(th.s_strong, "open_drag_drop_studio"))
+    note.append(" · ", style=th.s_45)
     note.append("COMPACT NOW", style=_click(th.s_strong, "pin_inject"))
-    note.append(" to inject compacted capsule", style=th.s_45)
     return Group(pane_heading("Windows", hint, theme=th, label_action="models"), table, Text(""), note)
 
 
@@ -555,8 +566,11 @@ def build_lake_pane(data: DashboardData) -> Group:
                 getattr(cn, "summary", ""),
                 cn.category,
             )
+            topic_cell = Text()
+            topic_cell.append("[≡] ", style=_click(th.s_strong, "start_drag_concept", cn.canonical_name))
+            topic_cell.append(c_info["short_topic"], style=_click(th.s_strong, "open_concept_crud", cn.canonical_name))
             concept_digest.add_row(
-                Text(c_info["short_topic"], style=_click(th.s_strong, "open_concept_crud", cn.canonical_name)),
+                topic_cell,
                 Text(_clip(c_info["plain_english"], 48), style=_click(th.s_ink, "open_concept_crud", cn.canonical_name)),
             )
 
@@ -794,6 +808,7 @@ def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
                 top_line.append("[pin]", style=_click(th.s_45, "quick_toggle_pin", cname))
             top_line.append(f" · {root_r.category}  ", style=_click(th.s_60, "select_node", cname))
             top_line.append(root_r.name, style=_click(th.s_ink, "open_concept_crud", cname))
+            top_line.append("  [≡ Drag to Window]", style=_click(th.s_strong, "start_drag_concept", cname))
             top_line.append("  [Explain & Edit]", style=_click(th.s_strong, "open_concept_crud", cname))
             top_line.append(" ", style=th.s_45)
             top_line.append("[×]", style=_click(th.s_45, "quick_delete_concept", cname))

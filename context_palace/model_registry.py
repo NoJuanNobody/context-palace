@@ -76,6 +76,13 @@ BUILTIN_MODEL_SPECS: Dict[str, ModelWindowSpec] = {
         max_context_tokens=1_000_000,
         max_output_tokens=64_000,
     ),
+    "claude-opus-5-5": ModelWindowSpec(
+        model_id="claude-opus-5-5",
+        canonical_name="Claude Opus 5.5",
+        provider="anthropic",
+        max_context_tokens=200_000,
+        max_output_tokens=64_000,
+    ),
     "claude-opus-4-6": ModelWindowSpec(
         model_id="claude-opus-4-6",
         canonical_name="Claude Opus 4.6",
@@ -437,6 +444,7 @@ class ModelContextRegistry:
         detected_model: Optional[str] = None
         explicit_max_tokens: Optional[int] = None
         used_tokens = 0
+        latest_usage_tokens: Optional[int] = None
         turn_count = 0
         session_meta: Dict[str, Any] = {}
 
@@ -473,12 +481,22 @@ class ModelContextRegistry:
                     if isinstance(val, str) and val.strip():
                         detected_model = val.strip()
 
-                # Nested message.model (Claude Code assistant turns often store model inside obj["message"]["model"])
+                # Nested message.model & message.usage (Claude Code assistant turns)
                 msg = obj.get("message")
                 if isinstance(msg, dict):
                     m_val = msg.get("model") or msg.get("model_id")
                     if isinstance(m_val, str) and m_val.strip():
                         detected_model = m_val.strip()
+                    usage = msg.get("usage")
+                    if isinstance(usage, dict):
+                        tot_u = (
+                            int(usage.get("input_tokens") or 0)
+                            + int(usage.get("cache_creation_input_tokens") or 0)
+                            + int(usage.get("cache_read_input_tokens") or 0)
+                            + int(usage.get("output_tokens") or 0)
+                        )
+                        if tot_u > 0:
+                            latest_usage_tokens = tot_u
 
                 # Antigravity USER_SETTINGS_CHANGE parsing: "Model Selection ... to Gemini 4 Argon (Medium)"
                 if obj.get("type") == "USER_SETTINGS_CHANGE" or "Model Selection" in str(obj.get("content", "")):
@@ -505,6 +523,9 @@ class ModelContextRegistry:
                             turn_count = len(obj["messages"])
                 except Exception:
                     pass
+
+        if latest_usage_tokens is not None and latest_usage_tokens > 0:
+            used_tokens = latest_usage_tokens
 
         # Fallback model per harness if none found in transcript
         if not detected_model:
@@ -569,22 +590,100 @@ class ModelContextRegistry:
             return f"{harness_type}-{file_path.parent.name[:8]}"
         return f"{harness_type}-{stem[:12]}"
 
+    @staticmethod
+    def _detect_live_open_process_info() -> Dict[str, Any]:
+        """
+        Inspect live OS processes (`ps`) and open file descriptors (`lsof -c agy`)
+        so closed terminal windows are immediately excluded from WINDOWS.
+        """
+        import subprocess
+
+        open_agy_conv_ids: set[str] = set()
+        agy_pids: List[str] = []
+        agy_tty_count = 0
+        claude_tty_count = 0
+        codex_tty_count = 0
+
+        try:
+            ps_out = subprocess.check_output(
+                ["ps", "-eo", "pid,tty,command"],
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+                text=True,
+            )
+            for ln in ps_out.splitlines():
+                parts = ln.strip().split(None, 2)
+                if len(parts) < 3:
+                    continue
+                pid, tty, cmd = parts
+                if tty == "??" or "grep" in cmd or "no-session-persistence" in cmd:
+                    continue
+                if re.search(r"(^|[ /])agy(\s|$)", cmd) and "remote-control serve" not in cmd:
+                    agy_tty_count += 1
+                    agy_pids.append(pid)
+                elif re.search(r"(^|[ /])claude(\s|$)", cmd):
+                    claude_tty_count += 1
+                elif re.search(r"(^|[ /])codex(\s|$)", cmd):
+                    codex_tty_count += 1
+        except Exception:
+            agy_tty_count = -1
+            claude_tty_count = -1
+
+        if agy_pids:
+            try:
+                lsof_out = subprocess.check_output(
+                    ["lsof", "-p", ",".join(agy_pids)],
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.5,
+                    text=True,
+                )
+                for m in re.finditer(r"/brain/([0-9a-fA-F\-]{8,36})(?:/|$)", lsof_out):
+                    open_agy_conv_ids.add(m.group(1))
+            except Exception:
+                pass
+
+        return {
+            "open_agy_conv_ids": open_agy_conv_ids,
+            "agy_tty_count": agy_tty_count,
+            "claude_tty_count": claude_tty_count,
+            "codex_tty_count": codex_tty_count,
+        }
+
     def discover_local_agents(
         self,
         search_dirs: Optional[List[str]] = None,
         limit: int = 10,
+        active_only: bool = True,
     ) -> List[AgentSession]:
         """
         Scan local agent directories (e.g. ~/.gemini/antigravity-cli/brain and ~/.claude/projects)
         for recent primary transcript files (excluding internal chunk files and headless subagents)
         and return their live AgentSession states.
+        When `search_dirs is None` and `active_only=True`, filters strictly to currently open
+        terminal sessions so closed agent windows do not linger in the TUI.
         """
+        is_default_scan = search_dirs is None
         if search_dirs is None:
             default_dirs = [
                 os.path.expanduser("~/.gemini/antigravity-cli/brain"),
                 os.path.expanduser("~/.claude/projects"),
             ]
             search_dirs = [d for d in default_dirs if os.path.isdir(d)]
+
+        live_info = (
+            self._detect_live_open_process_info()
+            if (is_default_scan and active_only)
+            else {
+                "open_agy_conv_ids": set(),
+                "agy_tty_count": -1,
+                "claude_tty_count": -1,
+                "codex_tty_count": -1,
+            }
+        )
+        open_agy_ids: set[str] = live_info["open_agy_conv_ids"]
+        agy_tty_count: int = live_info["agy_tty_count"]
+        claude_tty_count: int = live_info["claude_tty_count"]
+        now = time.time()
 
         candidates: List[Path] = []
         for d in search_dirs:
@@ -595,14 +694,38 @@ class ModelContextRegistry:
                 candidates.append(root)
                 continue
             for p in root.rglob("*.jsonl"):
-                # Skip internal chunk slices and transcript_full duplicates
-                if "chunks" in p.parts or p.name == "transcript_full.jsonl":
+                # Skip internal chunk slices, observer daemons, and transcript_full duplicates
+                if (
+                    "chunks" in p.parts
+                    or "subagents" in p.parts
+                    or any("observer-sessions" in part for part in p.parts)
+                    or p.name == "transcript_full.jsonl"
+                ):
                     continue
-                # For Antigravity brain directories, skip headless subagent transcripts (no USER_INPUT)
-                if "brain" in p.parts and p.name == "transcript.jsonl":
+                # For Antigravity brain directories, only inspect primary transcript.jsonl files
+                if "brain" in p.parts:
+                    if p.name != "transcript.jsonl":
+                        continue
+                    if is_default_scan and active_only:
+                        idx = p.parts.index("brain")
+                        conv_dir = p.parts[idx + 1] if idx + 1 < len(p.parts) else ""
+                        if agy_tty_count == 0:
+                            continue
+                        if open_agy_ids and conv_dir not in open_agy_ids:
+                            continue
+                        if not open_agy_ids and (now - p.stat().st_mtime) > 1800:
+                            continue
                     try:
                         txt = p.read_text(encoding="utf-8", errors="ignore")
                         if '"USER_INPUT"' not in txt:
+                            continue
+                    except OSError:
+                        continue
+                elif is_default_scan and active_only and ".claude" in str(p):
+                    if claude_tty_count == 0:
+                        continue
+                    try:
+                        if (now - p.stat().st_mtime) > 7200:
                             continue
                     except OSError:
                         continue
@@ -613,6 +736,8 @@ class ModelContextRegistry:
 
         sessions: List[AgentSession] = []
         seen_ids = set()
+        claude_added = 0
+        agy_added = 0
         for cand in candidates:
             if len(sessions) >= limit:
                 break
@@ -620,12 +745,88 @@ class ModelContextRegistry:
                 sess = self.detect_agent_session_from_file(str(cand))
                 if sess.agent_id in seen_ids:
                     continue
+                if is_default_scan and active_only:
+                    if sess.harness_type == "claude_code" and claude_tty_count > 0 and claude_added >= claude_tty_count:
+                        continue
+                    if sess.harness_type == "antigravity" and agy_tty_count > 0 and not open_agy_ids and agy_added >= agy_tty_count:
+                        continue
                 seen_ids.add(sess.agent_id)
+                if sess.harness_type == "claude_code":
+                    claude_added += 1
+                elif sess.harness_type == "antigravity":
+                    agy_added += 1
                 sessions.append(sess)
             except Exception:
                 continue
 
         return sessions
+
+
+def sync_live_agent_sessions(lake: Any, registry: Optional[ModelContextRegistry] = None) -> List[AgentSession]:
+    """
+    Reconcile `lake.list_agent_sessions()` with actually open local agent processes.
+    - Only runs auto-pruning on the user's real local Context Lake (`~/.context_palace/context_lake.db`)
+      or when existing sessions point to `~/.gemini/` or `~/.claude/` transcripts.
+    - Closed sessions are deleted from `agent_sessions` immediately so reopening or refreshing
+      the TUI never shows stale closed windows.
+    - Preserves `metadata['injected_concepts']` on open sessions for Drag & Drop Context Windows.
+    """
+    reg = registry if isinstance(registry, ModelContextRegistry) else ModelContextRegistry()
+    existing: List[AgentSession] = (
+        list(lake.list_agent_sessions()) if hasattr(lake, "list_agent_sessions") else []
+    )
+    db_path_str = str(getattr(lake, "db_path", "") or "")
+    default_db_str = os.path.expanduser("~/.context_palace/context_lake.db")
+    is_live_user_db = os.path.abspath(os.path.expanduser(db_path_str)) == os.path.abspath(default_db_str) if db_path_str and db_path_str != ":memory:" else False
+
+    has_real_transcript_sessions = any(
+        s.transcript_path
+        and (".gemini/antigravity-cli/brain" in str(s.transcript_path) or ".claude/projects" in str(s.transcript_path))
+        for s in existing
+    )
+    if not is_live_user_db and not has_real_transcript_sessions:
+        return existing
+
+    live_sessions = reg.discover_local_agents(search_dirs=None, limit=10, active_only=True)
+    live_by_id = {s.agent_id: s for s in live_sessions}
+    existing_by_id = {s.agent_id: s for s in existing}
+
+    # Prune closed transcript sessions from the database
+    for old_s in existing:
+        tp = str(old_s.transcript_path or "")
+        is_local_transcript = (
+            ".gemini/antigravity-cli/brain" in tp
+            or ".claude/projects" in tp
+            or (tp and not os.path.exists(tp))
+        )
+        if is_local_transcript and old_s.agent_id not in live_by_id:
+            if hasattr(lake, "delete_agent_session"):
+                lake.delete_agent_session(old_s.agent_id)
+
+    # Upsert open sessions while preserving drag-and-drop injected_concepts metadata
+    result: List[AgentSession] = []
+    for s in live_sessions:
+        prev = existing_by_id.get(s.agent_id)
+        if prev and isinstance(prev.metadata, dict):
+            injected = prev.metadata.get("injected_concepts")
+            if isinstance(injected, list) and injected:
+                s.metadata["injected_concepts"] = injected
+        if hasattr(lake, "upsert_agent_session"):
+            lake.upsert_agent_session(s)
+        result.append(s)
+
+    # Keep any manually created custom sessions that don't come from closed local transcripts
+    for old_s in existing:
+        tp = str(old_s.transcript_path or "")
+        is_local_transcript = (
+            ".gemini/antigravity-cli/brain" in tp
+            or ".claude/projects" in tp
+            or (tp and not os.path.exists(tp))
+        )
+        if not is_local_transcript and old_s.agent_id not in live_by_id:
+            result.append(old_s)
+
+    return result
 
 
 def raw_lower_or_norm(raw_model_id: str, norm_id: str) -> str:

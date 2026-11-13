@@ -151,6 +151,12 @@ def is_substantive_prompt(text: str) -> bool:
         return False
     if low.startswith("[rejected]"):
         return False
+    if low.startswith("base directory for this skill:"):
+        return False
+    if "<command-message>" in low or "<local-command-stdout>" in low or "<command-name>" in low:
+        return False
+    if re.match(r"^(execute|run|do)\s+all\s+\d+$", low):
+        return False
     if re.match(r"^(sk-[a-zA-Z0-9\-_]{16,}|ghp_[a-zA-Z0-9]{16,}|xox[baprs]-[a-zA-Z0-9\-]+)$", s):
         return False
     without_urls = re.sub(r"https?://\S+", "", s).strip()

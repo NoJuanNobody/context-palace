@@ -537,3 +537,64 @@ def test_visual_graph_shape_cards_sort_order_and_nl_agent(demo: dict) -> None:
     _run_app(demo, scenario)
 
 
+def test_drag_drop_context_studio_and_closed_session_pruning(demo: dict, tmp_path: Path) -> None:
+    from context_palace.model_registry import sync_live_agent_sessions
+    from context_palace.tui_app import DragDropStudioScreen
+
+    tui = demo["tui"]
+    lake = demo["lake"]
+
+    # 1. Verify closed transcript sessions (whose transcript file is gone/closed) are pruned
+    stale_sess = AgentSession(
+        agent_id="agy-closed99",
+        harness_type="antigravity",
+        model_id="gemini-4-argon",
+        max_context_tokens=1_000_000,
+        used_tokens=12_000,
+        transcript_path=str(tmp_path / ".gemini/antigravity-cli/brain/closed99/.system_generated/logs/transcript.jsonl"),
+    )
+    lake.upsert_agent_session(stale_sess)
+    assert lake.get_agent_session("agy-closed99") is not None
+    sync_live_agent_sessions(lake, demo["registry"])
+    assert lake.get_agent_session("agy-closed99") is None
+
+    # 2. Verify Drag & Drop between Centralized SQLite Lake and Actual Open Context Windows
+    async def scenario(app: ContextPalaceApp, pilot: Any) -> None:
+        # Drag concept from main screen onto open window
+        app.action_start_drag_concept("auth_strategy")
+        app.action_drop_on_window("claude-code-dev")
+        await pilot.pause()
+        sess = lake.get_agent_session("claude-code-dev")
+        assert "auth_strategy" in sess.metadata.get("injected_concepts", [])
+
+        # Open Drag & Drop Context Studio ([w])
+        await pilot.press("w")
+        await pilot.pause()
+        assert isinstance(app.screen, DragDropStudioScreen)
+
+        # Pick up 'database_engine' from SQLite Lake and drop onto 'antigravity-3ad38af4'
+        app.screen.action_pickup_concept("database_engine")
+        app.screen.action_drop_on_window("antigravity-3ad38af4")
+        await pilot.pause()
+        agy_sess = lake.get_agent_session("antigravity-3ad38af4")
+        assert "database_engine" in agy_sess.metadata.get("injected_concepts", [])
+
+        # Drag window topic from 'codex-main' into Centralized SQLite Lake
+        app.screen.action_save_window_to_lake("codex-main")
+        await pilot.pause()
+        codex_sess = lake.get_agent_session("codex-main")
+        assert len(codex_sess.metadata.get("injected_concepts", [])) >= 1
+
+        # Remove 'database_engine' from 'antigravity-3ad38af4' window without deleting from SQLite Lake
+        app.screen.action_remove_from_window("database_engine", "antigravity-3ad38af4")
+        await pilot.pause()
+        assert "database_engine" not in lake.get_agent_session("antigravity-3ad38af4").metadata.get("injected_concepts", [])
+        assert lake.get_concept("database_engine") is not None
+
+        app.screen.action_close()
+        await pilot.pause()
+
+    _run_app(demo, scenario)
+
+
+

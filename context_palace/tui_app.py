@@ -1008,6 +1008,442 @@ class InventoryScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class DragDropCard(Static):
+    """Draggable / Droppable card widget inside DragDropStudioScreen."""
+
+    def __init__(
+        self,
+        renderable: Any = "",
+        dnd_kind: str = "",
+        dnd_id: str = "",
+        dnd_label: str = "",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(renderable, **kwargs)
+        self.dnd_kind = dnd_kind  # "concept", "window", or "lake_dropzone"
+        self.dnd_id = dnd_id
+        self.dnd_label = dnd_label
+
+
+class DragDropStudioScreen(ModalScreen[None]):
+    """
+    Split-screen Drag & Drop Context Studio bridging:
+      Left Column:  Centralized SQLite Context Lake (~/.context_palace/context_lake.db)
+      Right Column: Actual Open Agent Context Windows (Live running terminal sessions only)
+    Supports both continuous mouse drag-and-drop (press -> move -> release) and click-to-transfer,
+    with 3-5 word summaries on every card.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close", show=False),
+        Binding("w", "close", "Close", show=False),
+        Binding("q", "close", "Close", show=False),
+        Binding("m", "sync_windows", "Sync Windows", show=False),
+    ]
+
+    DEFAULT_CSS = f"""
+    DragDropStudioScreen {{
+        background: {DARK_BG};
+        padding: 1 2;
+    }}
+    DragDropStudioScreen.theme-light {{
+        background: {LIGHT_BG};
+    }}
+    #dnd-root {{
+        background: {DARK_BG};
+        color: {DARK_INK};
+        border: round {DARK_INK};
+        padding: 1 2;
+        height: 1fr;
+    }}
+    DragDropStudioScreen.theme-light #dnd-root {{
+        background: {LIGHT_BG};
+        color: {LIGHT_INK};
+        border: round {LIGHT_INK};
+    }}
+    #dnd-header {{
+        height: auto;
+        margin-bottom: 1;
+    }}
+    #dnd-status-banner {{
+        height: auto;
+        margin-bottom: 1;
+    }}
+    #dnd-columns {{
+        height: 1fr;
+    }}
+    .dnd-col {{
+        width: 1fr;
+        height: 1fr;
+        border: round {DARK_INK_45};
+        padding: 0 1;
+        margin-right: 1;
+    }}
+    DragDropStudioScreen.theme-light .dnd-col {{
+        border: round {LIGHT_INK_45};
+    }}
+    .dnd-card {{
+        height: auto;
+        margin-bottom: 1;
+    }}
+    """
+
+    def __init__(self, tui: Any, theme_mode: str = "dark", initial_drag: Optional[Dict[str, str]] = None) -> None:
+        super().__init__()
+        self.tui = tui
+        self.theme_mode = theme_mode
+        self.drag_state: Optional[Dict[str, str]] = initial_drag
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dnd-root"):
+            yield Static(id="dnd-header")
+            yield Static(id="dnd-status-banner")
+            with Horizontal(id="dnd-columns"):
+                with VerticalScroll(classes="dnd-col", id="dnd-lake-col"):
+                    yield Vertical(id="dnd-lake-cards")
+                with VerticalScroll(classes="dnd-col", id="dnd-windows-col"):
+                    yield Vertical(id="dnd-windows-cards")
+
+    def on_mount(self) -> None:
+        self.set_class(self.theme_mode == "light", "theme-light")
+        self._render_studio()
+
+    def _update_banner_only(self) -> None:
+        from rich import box
+        from rich.panel import Panel
+
+        th = get_theme(self.theme_mode)
+        if self.drag_state:
+            kind = self.drag_state.get("kind", "concept")
+            lbl = self.drag_state.get("label", self.drag_state.get("id", ""))
+            src_id = self.drag_state.get("id", "")
+            target_hint = (
+                "Release mouse over (or click) any Open Context Window on the RIGHT to inject this SQLite context!"
+                if kind == "concept"
+                else "Release mouse over (or click) the Centralized SQLite Lake on the LEFT (or another Window) to drop!"
+            )
+            txt = Text()
+            txt.append(f"✋ DRAGGING {kind.upper()}: '{lbl}' ({src_id})  ──►  ", style=th.s_strong)
+            txt.append(target_hint, style=th.s_ink)
+            txt.append("   ", style=th.s_45)
+            txt.append("[ × Cancel Drag ]", style=_modal_click(th.s_45, "cancel_drag"))
+        else:
+            txt = Text(
+                "Drag & Drop any card between the CENTRALIZED SQLITE LAKE (Left) and ACTUAL OPEN AGENT WINDOWS (Right) — or click a card to pick it up and click destination to drop.",
+                style=th.s_60,
+            )
+        self.query_one("#dnd-status-banner", Static).update(
+            Panel(txt, box=box.ROUNDED, border_style=th.s_strong if self.drag_state else th.s_28, padding=(0, 1))
+        )
+
+    def _render_studio(self) -> None:
+        from rich import box
+        from rich.panel import Panel
+        from context_palace.summarizer import get_session_topic_summary
+
+        th = get_theme(self.theme_mode)
+        sessions = self.tui._fetch_agent_sessions()
+        nodes = (
+            list(self.tui.lake.list_concepts(include_tombstoned=False))
+            if hasattr(self.tui.lake, "list_concepts")
+            else []
+        )
+
+        # Header
+        top = Table.grid(expand=True)
+        top.add_column(justify="left")
+        top.add_column(justify="right")
+        actions = Text()
+        actions.append("[ ⟳ Sync Live Open Windows (m) ]", style=_modal_click(th.s_strong, "sync_windows"))
+        actions.append("  ")
+        actions.append("[ × Back to Palace (Esc / w) ]", style=_modal_click(th.s_ink, "close"))
+        top.add_row(
+            Text(
+                f"⇄ DRAG & DROP CONTEXT STUDIO  ·  {len(nodes)} SQLite Lake Concepts ↔ {len(sessions)} Live Open Window(s)",
+                style=th.s_strong,
+            ),
+            actions,
+        )
+        self.query_one("#dnd-header", Static).update(top)
+        self._update_banner_only()
+
+        # Map which open windows currently have each concept injected
+        concept_to_windows: Dict[str, List[str]] = {}
+        for s in sessions:
+            meta = s.metadata if isinstance(getattr(s, "metadata", None), dict) else {}
+            for cname in (meta.get("injected_concepts") or []):
+                concept_to_windows.setdefault(cname, []).append(s.agent_id)
+
+        # Rebuild Left Column: Centralized SQLite Lake
+        lake_container = self.query_one("#dnd-lake-cards", Vertical)
+        for child in list(lake_container.children):
+            child.remove()
+
+        lake_drop_txt = Text()
+        lake_drop_txt.append(
+            "1. CENTRALIZED CONTEXT LAKE (SQLite DB: ~/.context_palace/context_lake.db)\n",
+            style=th.s_strong,
+        )
+        lake_drop_txt.append(
+            "[ ⬇ DROP LIVE WINDOW CONTEXT HERE TO SAVE INTO CENTRALIZED SQLITE DB ]",
+            style=_modal_click(th.s_pill_on if (self.drag_state and self.drag_state.get("kind") == "window") else th.s_strong, "drop_on_lake"),
+        )
+        lake_container.mount(
+            DragDropCard(
+                Panel(lake_drop_txt, box=box.ROUNDED, border_style=th.s_45, padding=(0, 1)),
+                dnd_kind="lake_dropzone",
+                dnd_id="sqlite_lake",
+                dnd_label="Centralized SQLite Lake",
+                classes="dnd-card",
+            )
+        )
+
+        for idx, n in enumerate(nodes, start=1):
+            cname = n.canonical_name
+            shape, _ = get_category_shape(n.category)
+            c_info = summarize_concept(cname, n.active_value, getattr(n, "summary", ""), n.category)
+            short_topic = c_info["short_topic"]
+            plain = c_info["plain_english"]
+            in_wins = concept_to_windows.get(cname, [])
+
+            l1 = Text()
+            l1.append("[≡ DRAG] ", style=_modal_click(th.s_pill_on, "pickup_concept", cname))
+            l1.append(f"{shape} #{idx} · {short_topic} ", style=_modal_click(th.s_strong, "pickup_concept", cname))
+            l1.append(f"({cname} · {int(round(n.confidence * 100))}%)", style=th.s_60)
+            if n.pinned:
+                l1.append(" ★ PINNED", style=th.s_strong)
+
+            l2 = Text(f"  Summary: {plain}", style=th.s_ink, overflow="fold")
+
+            l3 = Text("  ")
+            if in_wins:
+                l3.append(f"In Windows: {', '.join(in_wins)}   ", style=th.s_strong)
+            for s in sessions:
+                l3.append(
+                    f"[ ➔ Drop to {s.agent_id} ] ",
+                    style=_modal_click(th.s_strong, "quick_drop_to_window", cname, s.agent_id),
+                )
+
+            card_panel = Panel(
+                Group(l1, l2, l3),
+                box=box.ROUNDED,
+                border_style=th.s_strong if (self.drag_state and self.drag_state.get("id") == cname) else th.s_28,
+                padding=(0, 1),
+            )
+            lake_container.mount(
+                DragDropCard(
+                    card_panel,
+                    dnd_kind="concept",
+                    dnd_id=cname,
+                    dnd_label=short_topic,
+                    classes="dnd-card",
+                )
+            )
+
+        # Rebuild Right Column: Actual Open Context Windows
+        win_container = self.query_one("#dnd-windows-cards", Vertical)
+        for child in list(win_container.children):
+            child.remove()
+
+        win_hdr = Text(
+            f"2. ACTUAL OPEN CONTEXT WINDOWS ({len(sessions)} Live Running Terminal Sessions · Closed Windows Pruned)",
+            style=th.s_strong,
+        )
+        win_container.mount(Static(win_hdr, classes="dnd-card"))
+
+        if not sessions:
+            win_container.mount(
+                Static(
+                    Panel(
+                        Text("(0 open agent sessions detected — launch `agy` or `claude` in a terminal)"),
+                        box=box.ROUNDED,
+                        border_style=th.s_28,
+                    )
+                )
+            )
+        node_by_cname = {n.canonical_name: n for n in nodes}
+        for s in sessions:
+            aid = s.agent_id
+            topic_3_5w, latest_detail = get_session_topic_summary(s)
+            meta = s.metadata if isinstance(getattr(s, "metadata", None), dict) else {}
+            injected = list(meta.get("injected_concepts") or [])
+
+            w1 = Text()
+            w1.append(f"● OPEN WINDOW: {aid}  ", style=th.s_strong)
+            w1.append(f"({s.harness_type} · {s.model_id} · {s.used_tokens:,}/{s.max_context_tokens:,} tok · {s.utilization_pct:.1f}%)", style=th.s_60)
+
+            w2 = Text.assemble(
+                ("  Window Topic Summary (3-5w): ", th.s_60),
+                (topic_3_5w, th.s_strong),
+            )
+            w3 = Text(f"  Latest Prompt: \"{latest_detail[:82]}\"", style=th.s_60, overflow="fold")
+
+            w_actions = Text("  ")
+            w_actions.append(
+                f"[ ⬇ DROP SQLITE CONTEXT INTO {aid} ]",
+                style=_modal_click(
+                    th.s_pill_on if (self.drag_state and self.drag_state.get("kind") == "concept") else th.s_strong,
+                    "drop_on_window",
+                    aid,
+                ),
+            )
+            w_actions.append("   ")
+            w_actions.append(
+                "[ ⬅ Drag / Save Window Topic to SQLite Lake ]",
+                style=_modal_click(th.s_ink, "save_window_to_lake", aid),
+            )
+
+            inj_lines: List[Any] = [
+                Text(f"  SQLite Context Items Injected in {aid} ({len(injected)}):", style=th.s_label)
+            ]
+            if not injected:
+                inj_lines.append(
+                    Text("    (Drag any concept card from the Left SQLite Lake and drop it here)", style=th.s_45)
+                )
+            else:
+                for ic_name in injected:
+                    ic_node = node_by_cname.get(ic_name)
+                    if ic_node:
+                        ic_shape, _ = get_category_shape(ic_node.category)
+                        ic_info = summarize_concept(ic_name, ic_node.active_value, ic_node.summary, ic_node.category)
+                        ic_summary = f"{ic_shape} {ic_info['short_topic']} — {ic_info['plain_english'][:52]}"
+                    else:
+                        ic_summary = f"◆ {ic_name}"
+                    row_t = Text("    • ")
+                    row_t.append(ic_summary, style=th.s_ink)
+                    row_t.append(f" ({ic_name})  ", style=th.s_60)
+                    row_t.append("[× Remove]", style=_modal_click(th.s_45, "remove_from_window", ic_name, aid))
+                    inj_lines.append(row_t)
+
+            w_panel = Panel(
+                Group(w1, w2, w3, Text(""), w_actions, Text(""), *inj_lines),
+                box=box.ROUNDED,
+                border_style=th.s_strong if (self.drag_state and self.drag_state.get("kind") == "concept") else th.s_45,
+                padding=(0, 1),
+            )
+            win_container.mount(
+                DragDropCard(
+                    w_panel,
+                    dnd_kind="window",
+                    dnd_id=aid,
+                    dnd_label=topic_3_5w,
+                    classes="dnd-card",
+                )
+            )
+
+    def _find_dnd_card_at(self, screen_x: int, screen_y: int) -> Optional[DragDropCard]:
+        try:
+            widget, _ = self.get_widget_at(screen_x, screen_y)
+        except Exception:
+            return None
+        cur: Any = widget
+        while cur is not None:
+            if isinstance(cur, DragDropCard):
+                return cur
+            cur = getattr(cur, "parent", None)
+        return None
+
+    def on_mouse_down(self, event: Any) -> None:
+        card = self._find_dnd_card_at(event.screen_x, event.screen_y)
+        if card is not None and card.dnd_kind in ("concept", "window"):
+            self._mouse_down_card = card
+            self._mouse_down_pos = (event.screen_x, event.screen_y)
+
+    def on_mouse_move(self, event: Any) -> None:
+        down_card = getattr(self, "_mouse_down_card", None)
+        down_pos = getattr(self, "_mouse_down_pos", None)
+        if down_card is not None and down_pos is not None:
+            if abs(event.screen_x - down_pos[0]) + abs(event.screen_y - down_pos[1]) >= 2:
+                if not self.drag_state or self.drag_state.get("id") != down_card.dnd_id:
+                    self.drag_state = {
+                        "kind": down_card.dnd_kind,
+                        "id": down_card.dnd_id,
+                        "label": down_card.dnd_label,
+                    }
+                    self._update_banner_only()
+
+    def on_mouse_up(self, event: Any) -> None:
+        down_card = getattr(self, "_mouse_down_card", None)
+        self._mouse_down_card = None
+        self._mouse_down_pos = None
+        if not self.drag_state:
+            return
+        target_card = self._find_dnd_card_at(event.screen_x, event.screen_y)
+        if target_card is None or (down_card is not None and target_card is down_card):
+            return
+        src_kind = self.drag_state.get("kind")
+        src_id = self.drag_state.get("id", "")
+        if src_kind == "concept" and target_card.dnd_kind == "window":
+            self.drag_state = None
+            self.tui.execute_key_action("dnd", {"op": "lake_to_window", "node_id_or_name": src_id, "agent_id": target_card.dnd_id})
+            self._render_studio()
+        elif src_kind == "window" and target_card.dnd_kind in ("lake_dropzone", "concept"):
+            self.drag_state = None
+            self.tui.execute_key_action("dnd", {"op": "window_to_lake", "agent_id": src_id})
+            self._render_studio()
+        elif src_kind == "window" and target_card.dnd_kind == "window" and target_card.dnd_id != src_id:
+            self.drag_state = None
+            self.tui.execute_key_action("dnd", {"op": "window_to_window", "source_agent_id": src_id, "target_agent_id": target_card.dnd_id})
+            self._render_studio()
+
+    def action_pickup_concept(self, cname: str) -> None:
+        node = self.tui.lake.get_concept(cname, include_tombstoned=True)
+        c_info = summarize_concept(cname, node.active_value if node else "")
+        self.drag_state = {"kind": "concept", "id": cname, "label": c_info["short_topic"]}
+        self._render_studio()
+
+    def action_cancel_drag(self) -> None:
+        self.drag_state = None
+        self._render_studio()
+
+    def action_quick_drop_to_window(self, cname: str, agent_id: str) -> None:
+        self.drag_state = None
+        self.tui.execute_key_action("dnd", {"op": "lake_to_window", "node_id_or_name": cname, "agent_id": agent_id})
+        self._render_studio()
+
+    def action_drop_on_window(self, agent_id: str) -> None:
+        if self.drag_state and self.drag_state.get("kind") == "concept":
+            cname = self.drag_state["id"]
+            self.drag_state = None
+            self.tui.execute_key_action("dnd", {"op": "lake_to_window", "node_id_or_name": cname, "agent_id": agent_id})
+            self._render_studio()
+            return
+        if self.drag_state and self.drag_state.get("kind") == "window" and self.drag_state.get("id") != agent_id:
+            src_agent = self.drag_state["id"]
+            self.drag_state = None
+            self.tui.execute_key_action("dnd", {"op": "window_to_window", "source_agent_id": src_agent, "target_agent_id": agent_id})
+            self._render_studio()
+            return
+        # If nothing was picked up yet, pick up the currently selected node from the palace
+        fallback_node = self.tui.selected_node_id
+        if fallback_node:
+            self.tui.execute_key_action("dnd", {"op": "lake_to_window", "node_id_or_name": fallback_node, "agent_id": agent_id})
+            self._render_studio()
+
+    def action_drop_on_lake(self) -> None:
+        if self.drag_state and self.drag_state.get("kind") == "window":
+            aid = self.drag_state["id"]
+            self.drag_state = None
+            self.tui.execute_key_action("dnd", {"op": "window_to_lake", "agent_id": aid})
+            self._render_studio()
+
+    def action_save_window_to_lake(self, agent_id: str) -> None:
+        self.drag_state = None
+        self.tui.execute_key_action("dnd", {"op": "window_to_lake", "agent_id": agent_id})
+        self._render_studio()
+
+    def action_remove_from_window(self, cname: str, agent_id: str) -> None:
+        self.tui.execute_key_action("dnd", {"op": "remove_from_window", "node_id_or_name": cname, "agent_id": agent_id})
+        self._render_studio()
+
+    def action_sync_windows(self) -> None:
+        self.tui.execute_key_action("m", {})
+        self._render_studio()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 def build_inventory_report(tui: Any) -> Tuple[str, str]:
     """Full untruncated inventory via inventory.LakeInventoryExporter (same as `context-palace list-all`)."""
     import contextlib
@@ -1173,6 +1609,7 @@ class ContextPalaceApp(App[None]):
         Binding("m", "models", "Models"),
         Binding("t", "time_travel", "Time-Travel"),
         Binding("o", "cycle_sort_order", "Order"),
+        Binding("w", "open_drag_drop_studio", "Drag & Drop"),
         Binding("slash", "focus_nl_agent", "NL Agent", show=False),
         Binding("escape", "blur_nl_agent", "Blur", show=False),
         Binding("k", "toggle_theme", "Theme"),
@@ -1249,6 +1686,37 @@ class ContextPalaceApp(App[None]):
     def on_resize(self, event: Any) -> None:
         self._apply_breakpoint(event.size.width)
         self.refresh_panes()
+
+    def _find_pane_id_at(self, screen_x: int, screen_y: int) -> Optional[str]:
+        try:
+            widget, _ = self.get_widget_at(screen_x, screen_y)
+        except Exception:
+            return None
+        cur: Any = widget
+        while cur is not None:
+            wid = getattr(cur, "id", None)
+            if wid in ("pane-windows", "pane-lake", "pane-graph", "pane-audit"):
+                return wid
+            cur = getattr(cur, "parent", None)
+        return None
+
+    def on_mouse_down(self, event: Any) -> None:
+        self._mouse_down_pane = self._find_pane_id_at(event.screen_x, event.screen_y)
+
+    def on_mouse_up(self, event: Any) -> None:
+        src_pane = getattr(self, "_mouse_down_pane", None)
+        self._mouse_down_pane = None
+        dst_pane = self._find_pane_id_at(event.screen_x, event.screen_y)
+        if not src_pane or not dst_pane or src_pane == dst_pane:
+            return
+        if src_pane in ("pane-lake", "pane-graph") and dst_pane == "pane-windows":
+            target_agent = self._worst_agent()
+            if target_agent:
+                self.action_drop_on_window(target_agent)
+        elif src_pane == "pane-windows" and dst_pane in ("pane-lake", "pane-graph"):
+            src_agent = self._worst_agent()
+            if src_agent:
+                self.action_drag_window_to_lake(src_agent)
 
     def _sync_theme_class(self) -> None:
         mode = getattr(self.tui, "theme_mode", "dark")
@@ -1329,12 +1797,74 @@ class ContextPalaceApp(App[None]):
             "m": self.action_models,
             "t": self.action_time_travel,
             "o": self.action_cycle_sort_order,
+            "w": self.action_open_drag_drop_studio,
             "k": self.action_toggle_theme,
             "q": self.action_quit,
         }
         fn = dispatch.get(key.lower())
         if fn is not None:
             fn()
+
+    def action_open_drag_drop_studio(self) -> None:
+        """Open the split-screen Drag & Drop Context Studio (Centralized SQLite Lake <-> Actual Open Windows)."""
+        init_drag = getattr(self, "_main_drag_state", None)
+        self._main_drag_state = None
+        self.push_screen(
+            DragDropStudioScreen(
+                self.tui,
+                theme_mode=getattr(self.tui, "theme_mode", "dark"),
+                initial_drag=init_drag,
+            ),
+            lambda _: self.refresh_panes(),
+        )
+
+    def action_start_drag_concept(self, node_id_or_name: str) -> None:
+        """Pick up a concept card from the Centralized SQLite Lake to drop onto an open Agent Window."""
+        self.tui.selected_node_id = node_id_or_name
+        node = self.tui.lake.get_concept(node_id_or_name, include_tombstoned=True)
+        c_info = summarize_concept(node_id_or_name, node.active_value if node else "")
+        self._main_drag_state = {
+            "kind": "concept",
+            "id": node_id_or_name,
+            "label": c_info["short_topic"],
+        }
+        self.tui.status_message = (
+            f"✋ Dragging SQLite Concept '{c_info['short_topic']}' ({node_id_or_name}) — Click [⬇ Drop] on any Open Window in WINDOWS!"
+        )
+        self.refresh_panes()
+
+    def action_drop_on_window(self, agent_id: str) -> None:
+        """Drop the currently dragged/selected SQLite concept onto the target Open Agent Window."""
+        drag = getattr(self, "_main_drag_state", None)
+        cname = (drag.get("id") if drag and drag.get("kind") == "concept" else None) or self.tui.selected_node_id
+        self._main_drag_state = None
+        if not cname:
+            nodes = self.tui.lake.list_concepts(include_tombstoned=False) if hasattr(self.tui.lake, "list_concepts") else []
+            cname = nodes[0].canonical_name if nodes else ""
+        if not cname:
+            self.tui.status_message = "Select or drag a concept from LAKE / GRAPH first"
+            self.refresh_panes()
+            return
+        self._run(
+            "dnd",
+            {"op": "lake_to_window", "node_id_or_name": cname, "agent_id": agent_id},
+            lambda r: [
+                f"palace$ dnd {cname} ──► {agent_id}",
+                f"  injected '{r.get('short_topic', cname)}' into live window {agent_id}",
+            ],
+        )
+
+    def action_drag_window_to_lake(self, agent_id: str) -> None:
+        """Drag/save an open Agent Window's live topic summary into the Centralized SQLite Lake."""
+        self._main_drag_state = None
+        self._run(
+            "dnd",
+            {"op": "window_to_lake", "agent_id": agent_id},
+            lambda r: [
+                f"palace$ dnd {agent_id} ──► sqlite_lake ({r.get('node', '')})",
+                f"  saved '{r.get('short_topic', '')}' into Centralized SQLite Lake",
+            ],
+        )
 
     def action_focus_nl_agent(self) -> None:
         try:

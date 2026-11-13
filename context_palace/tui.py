@@ -299,18 +299,23 @@ class MemoryPalaceTUI:
         self.last_output: List[str] = []
 
     def _fetch_agent_sessions(self) -> List[AgentSession]:
-        raw: List[AgentSession] = []
-        if hasattr(self.lake, "list_agent_sessions"):
-            sessions = self.lake.list_agent_sessions()
-            raw = list(sessions) if sessions else []
-        elif hasattr(self.lake, "get_agent_sessions"):
-            sessions = self.lake.get_agent_sessions()
-            raw = list(sessions) if sessions else []
+        try:
+            from context_palace.model_registry import sync_live_agent_sessions
+
+            raw = sync_live_agent_sessions(self.lake, self.registry)
+        except Exception:
+            raw = []
+            if hasattr(self.lake, "list_agent_sessions"):
+                sessions = self.lake.list_agent_sessions()
+                raw = list(sessions) if sessions else []
+            elif hasattr(self.lake, "get_agent_sessions"):
+                sessions = self.lake.get_agent_sessions()
+                raw = list(sessions) if sessions else []
 
         cleaned: List[AgentSession] = []
         for s in raw:
             tp = str(s.transcript_path or "")
-            if "/chunks/" in tp:
+            if "/chunks/" in tp or "observer-sessions" in tp:
                 continue
             if s.agent_id.startswith("session-") and s.harness_type == "conversation" and not tp:
                 continue
@@ -868,16 +873,30 @@ class MemoryPalaceTUI:
             if self.registry is not None and hasattr(self.registry, "discover_local_agents"):
                 search_dirs = payload.get("search_dirs")
                 limit = int(payload.get("limit", 10))
-                discovered = list(
-                    _call_compatible(
-                        self.registry.discover_local_agents,
-                        search_dirs=search_dirs,
-                        limit=limit,
+                if search_dirs is None:
+                    try:
+                        from context_palace.model_registry import sync_live_agent_sessions
+
+                        discovered = sync_live_agent_sessions(self.lake, self.registry)
+                    except Exception:
+                        discovered = list(
+                            _call_compatible(
+                                self.registry.discover_local_agents,
+                                search_dirs=search_dirs,
+                                limit=limit,
+                            )
+                        )
+                else:
+                    discovered = list(
+                        _call_compatible(
+                            self.registry.discover_local_agents,
+                            search_dirs=search_dirs,
+                            limit=limit,
+                        )
                     )
-                )
-                if hasattr(self.lake, "upsert_agent_session"):
-                    for sess in discovered:
-                        self.lake.upsert_agent_session(sess)
+                    if hasattr(self.lake, "upsert_agent_session"):
+                        for sess in discovered:
+                            self.lake.upsert_agent_session(sess)
                 try:
                     from context_palace.summarizer import sync_session_topics_to_lake
 
@@ -887,7 +906,7 @@ class MemoryPalaceTUI:
             else:
                 discovered = self._fetch_agent_sessions()
 
-            self.status_message = f"Refreshed {len(discovered)} agent model windows"
+            self.status_message = f"Synced {len(discovered)} live open agent window(s)"
             return {
                 "status": "ok",
                 "action": "refresh_models",
@@ -1002,6 +1021,141 @@ class MemoryPalaceTUI:
             instruction = str(payload.get("instruction") or payload.get("message") or "").strip()
             default_node = payload.get("default_node_name") or self.selected_node_id
             return execute_natural_language_agent_turn(self, instruction, default_node_name=default_node)
+
+        if action_key == "dnd":
+            import os
+            import re
+            from context_palace.summarizer import get_session_topic_summary, summarize_concept
+
+            op = str(payload.get("op") or "lake_to_window").strip().lower()
+            if op == "lake_to_window":
+                node_ref = str(payload.get("node_id_or_name") or "").strip()
+                agent_id = str(payload.get("agent_id") or self.selected_agent_id or "").strip()
+                if not node_ref or not agent_id:
+                    raise ValueError("Drag & Drop requires both a concept node and a target agent window.")
+                node = self.lake.get_concept(node_ref, include_tombstoned=True)
+                if node is None:
+                    raise KeyError(f"Concept {node_ref!r} not found in Centralized SQLite Lake.")
+                sess = self.lake.get_agent_session(agent_id) if hasattr(self.lake, "get_agent_session") else None
+                if sess is None:
+                    raise KeyError(f"Agent window {agent_id!r} not found.")
+                if not isinstance(sess.metadata, dict):
+                    sess.metadata = {}
+                injected: List[str] = list(sess.metadata.get("injected_concepts") or [])
+                if node.canonical_name in injected:
+                    injected.remove(node.canonical_name)
+                injected.insert(0, node.canonical_name)
+                sess.metadata["injected_concepts"] = injected
+                self.lake.upsert_agent_session(sess)
+                c_info = summarize_concept(node.canonical_name, node.active_value, node.summary, node.category)
+                short_topic = c_info["short_topic"]
+                sidecar_dir = os.path.expanduser("~/.context_palace/capsules")
+                sidecar_path = os.path.join(sidecar_dir, f"{agent_id}.md")
+                cap_res = self.execute_key_action(
+                    "p",
+                    {
+                        "node_id_or_name": node.canonical_name,
+                        "agent_id": agent_id,
+                        "query": f"{short_topic} {node.canonical_name}",
+                        "sidecar_path": sidecar_path,
+                    },
+                )
+                self.selected_node_id = node.canonical_name
+                self.selected_agent_id = agent_id
+                self.status_message = (
+                    f"Dropped SQLite Context '{short_topic}' ({node.canonical_name}) ──► Window '{agent_id}'"
+                )
+                return {
+                    "status": "ok",
+                    "action": "dnd_lake_to_window",
+                    "node": node.canonical_name,
+                    "short_topic": short_topic,
+                    "agent_id": agent_id,
+                    "injected_concepts": injected,
+                    "capsule": cap_res.get("capsule"),
+                }
+
+            if op == "window_to_lake":
+                agent_id = str(payload.get("agent_id") or self.selected_agent_id or "").strip()
+                if not agent_id:
+                    raise ValueError("Drag & Drop requires a source agent window.")
+                sess = self.lake.get_agent_session(agent_id) if hasattr(self.lake, "get_agent_session") else None
+                if sess is None:
+                    raise KeyError(f"Agent window {agent_id!r} not found.")
+                short_topic, detail = get_session_topic_summary(sess)
+                slug_words = [w.lower() for w in re.findall(r"[A-Za-z0-9]+", short_topic)[:4]]
+                canonical_name = "_".join(slug_words) if slug_words else f"window_{agent_id.replace('-', '_')}"
+                val_text = detail or short_topic
+                sum_text = f"[{agent_id}] {short_topic}: {val_text}"
+                node = self.lake.create_concept(
+                    canonical_name=canonical_name,
+                    category="architecture",
+                    value=val_text,
+                    summary=sum_text,
+                    confidence=0.96,
+                    pinned=True,
+                    source_agent_id=agent_id,
+                    provenance_type="user_explicit",
+                )
+                if not isinstance(sess.metadata, dict):
+                    sess.metadata = {}
+                injected = list(sess.metadata.get("injected_concepts") or [])
+                if node.canonical_name not in injected:
+                    injected.insert(0, node.canonical_name)
+                sess.metadata["injected_concepts"] = injected
+                self.lake.upsert_agent_session(sess)
+                self.selected_node_id = node.canonical_name
+                self.selected_agent_id = agent_id
+                self.status_message = (
+                    f"Dropped Window '{agent_id}' ('{short_topic}') ──► Centralized SQLite Lake ({node.canonical_name})"
+                )
+                return {
+                    "status": "ok",
+                    "action": "dnd_window_to_lake",
+                    "agent_id": agent_id,
+                    "node": node.canonical_name,
+                    "short_topic": short_topic,
+                }
+
+            if op == "window_to_window":
+                src_agent = str(payload.get("source_agent_id") or "").strip()
+                dst_agent = str(payload.get("target_agent_id") or "").strip()
+                if not src_agent or not dst_agent:
+                    raise ValueError("Window-to-Window Drag & Drop requires source and target windows.")
+                res_lake = self.execute_key_action("dnd", {"op": "window_to_lake", "agent_id": src_agent})
+                created_cname = res_lake["node"]
+                res_win = self.execute_key_action(
+                    "dnd",
+                    {"op": "lake_to_window", "node_id_or_name": created_cname, "agent_id": dst_agent},
+                )
+                self.status_message = (
+                    f"Dragged Context '{res_lake['short_topic']}' from Window '{src_agent}' ──► Window '{dst_agent}'"
+                )
+                return {
+                    "status": "ok",
+                    "action": "dnd_window_to_window",
+                    "source_agent_id": src_agent,
+                    "target_agent_id": dst_agent,
+                    "node": created_cname,
+                    "short_topic": res_lake["short_topic"],
+                    "capsule": res_win.get("capsule"),
+                }
+
+            if op == "remove_from_window":
+                node_ref = str(payload.get("node_id_or_name") or "").strip()
+                agent_id = str(payload.get("agent_id") or "").strip()
+                sess = self.lake.get_agent_session(agent_id) if hasattr(self.lake, "get_agent_session") else None
+                if sess is not None and isinstance(sess.metadata, dict):
+                    injected = [c for c in (sess.metadata.get("injected_concepts") or []) if c != node_ref]
+                    sess.metadata["injected_concepts"] = injected
+                    self.lake.upsert_agent_session(sess)
+                self.status_message = f"Removed '{node_ref}' from Window '{agent_id}' context capsule"
+                return {
+                    "status": "ok",
+                    "action": "dnd_remove_from_window",
+                    "node": node_ref,
+                    "agent_id": agent_id,
+                }
 
         raise ValueError(f"Unsupported key action: {key!r}")
 
