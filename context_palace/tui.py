@@ -292,6 +292,7 @@ class MemoryPalaceTUI:
         self.as_of: Optional[float] = None
         self.selected_agent_id: Optional[str] = None
         self.selected_node_id: Optional[str] = None
+        self.graph_sort_order: str = "pinned_recent"
         self.status_message: str = "Ready"
         self.chat_history: List[Dict[str, Any]] = []
         self.last_capsule: Optional[Dict[str, Any]] = None
@@ -466,6 +467,8 @@ class MemoryPalaceTUI:
             status_message=self.status_message,
             search_query=search_query,
             selected_agent_id=effective_agent,
+            selected_node_id=self.selected_node_id,
+            graph_sort_order=self.graph_sort_order,
             sessions=sessions,
             nodes=nodes,
             edges=edges,
@@ -975,6 +978,30 @@ class MemoryPalaceTUI:
                 "action": "upsert_session",
                 "session": saved.to_dict() if hasattr(saved, "to_dict") else saved,
             }
+
+        if action_key in ("o", "sort"):
+            orders = ("pinned_recent", "recent", "session", "category")
+            req_order = (payload.get("order") or "").strip().lower()
+            if req_order in orders:
+                self.graph_sort_order = req_order
+            else:
+                idx = orders.index(self.graph_sort_order) if self.graph_sort_order in orders else 0
+                self.graph_sort_order = orders[(idx + 1) % len(orders)]
+            labels = {
+                "pinned_recent": "1. ★ Pinned & Recent",
+                "recent": "2. Latest Updated",
+                "session": "3. By Session/Agent",
+                "category": "4. ▲ By Category Shape",
+            }
+            self.status_message = f"Graph viewing order: {labels.get(self.graph_sort_order, self.graph_sort_order)}"
+            return {"status": "ok", "action": "sort", "graph_sort_order": self.graph_sort_order}
+
+        if action_key == "nl":
+            from context_palace.summarizer import execute_natural_language_agent_turn
+
+            instruction = str(payload.get("instruction") or payload.get("message") or "").strip()
+            default_node = payload.get("default_node_name") or self.selected_node_id
+            return execute_natural_language_agent_turn(self, instruction, default_node_name=default_node)
 
         raise ValueError(f"Unsupported key action: {key!r}")
 

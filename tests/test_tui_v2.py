@@ -486,3 +486,54 @@ def test_topic_and_concept_summaries_in_all_four_panes(demo: dict) -> None:
     assert "Active Topic Summaries" in out
     assert "Ed25519" in out
 
+
+def test_visual_graph_shape_cards_sort_order_and_nl_agent(demo: dict) -> None:
+    from context_palace.tui_app import ConceptCrudScreen
+
+    tui = demo["tui"]
+    lake = demo["lake"]
+
+    out = tui.render_dashboard(width=200)
+    # 1. Visual Node Shape Cards & View Order bar in GRAPH
+    assert "VIEW ORDER:" in out
+    assert "1. ★ Pinned & Recent" in out
+    assert "NODE SHAPES:  ▲ Architecture" in out
+    # 2. Selected Node Explanation in AUDIT
+    assert "SELECTED NODE EXPLANATION" in out
+    assert "What this represents:" in out
+    assert "Why it matters:" in out
+
+    # 3. Interactive Textual actions: select node, change sort order, and update via Natural-Language Terminal Agent
+    async def scenario(app: ContextPalaceApp, pilot: Any) -> None:
+        # Select a node -> updates Selected Node Explanation in AUDIT without opening a modal form
+        app.action_select_node("auth_strategy")
+        await pilot.pause()
+        assert tui.selected_node_id == "auth_strategy"
+        audit_txt = _static_text(app, "audit")
+        assert "SELECTED NODE EXPLANATION" in audit_txt and "(auth_strategy)" in audit_txt
+        assert "What this represents:" in audit_txt
+
+        # Change viewing order via set_sort_order
+        app.action_set_sort_order("category")
+        await pilot.pause()
+        assert tui.graph_sort_order == "category"
+
+        # Update node via Natural-Language Terminal Agent inside ConceptCrudScreen
+        app.action_open_concept_crud("auth_strategy")
+        await pilot.pause()
+        assert isinstance(app.screen, ConceptCrudScreen)
+        nl_in = app.screen.query_one("#crud-nl-input")
+        nl_in.value = "Change auth_strategy to Use Passkeys + Hardware YubiKey, set confidence to 99%, and link to mcp_server"
+        app.screen.action_apply_nl()
+        await pilot.pause()
+
+        updated = lake.get_concept("auth_strategy")
+        assert "Passkeys + Hardware YubiKey" in updated.active_value
+        assert updated.confidence == pytest.approx(0.99)
+        edges = lake.list_edges(node_id=updated.node_id, active_only=True)
+        mcp_node = lake.get_concept("mcp_server")
+        assert any(e.target_id == mcp_node.node_id or e.source_id == mcp_node.node_id for e in edges)
+
+    _run_app(demo, scenario)
+
+

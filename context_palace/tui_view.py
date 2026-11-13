@@ -175,6 +175,7 @@ class GraphRow:
     canonical_name: str = ""
     topic_summary: str = ""
     plain_english: str = ""
+    source_agent_id: str = ""
 
 
 @dataclass
@@ -187,6 +188,8 @@ class DashboardData:
     status_message: str = "Ready"
     search_query: str = ""
     selected_agent_id: Optional[str] = None
+    selected_node_id: Optional[str] = None
+    graph_sort_order: str = "pinned_recent"
     sessions: List[Any] = field(default_factory=list)
     nodes: List[Any] = field(default_factory=list)
     edges: List[Any] = field(default_factory=list)
@@ -628,15 +631,32 @@ def collect_graph_rows(
     for e in data.edges:
         out_edges.setdefault(e.source_id, []).append(e)
 
-    roots = sorted(
-        nodes,
-        key=lambda n: (
-            not bool(n.pinned),
-            -float(n.confidence),
-            -float(getattr(n, "updated_at", 0.0)),
-            n.canonical_name,
-        ),
-    )[:max_roots]
+    sort_mode = getattr(data, "graph_sort_order", "pinned_recent")
+    if sort_mode == "recent":
+        roots = sorted(
+            nodes,
+            key=lambda n: (-float(getattr(n, "updated_at", 0.0)), not bool(n.pinned), n.canonical_name),
+        )[:max_roots]
+    elif sort_mode == "session":
+        roots = sorted(
+            nodes,
+            key=lambda n: (str(getattr(n, "source_agent_id", "")), not bool(n.pinned), -float(getattr(n, "updated_at", 0.0))),
+        )[:max_roots]
+    elif sort_mode == "category":
+        roots = sorted(
+            nodes,
+            key=lambda n: (str(getattr(n, "category", "")), not bool(n.pinned), -float(getattr(n, "updated_at", 0.0))),
+        )[:max_roots]
+    else:
+        roots = sorted(
+            nodes,
+            key=lambda n: (
+                not bool(n.pinned),
+                -float(n.confidence),
+                -float(getattr(n, "updated_at", 0.0)),
+                n.canonical_name,
+            ),
+        )[:max_roots]
 
     def node_row(node: Any, prefix: str, relation: str, is_root: bool) -> GraphRow:
         c_info = summarize_concept(
@@ -658,6 +678,7 @@ def collect_graph_rows(
             canonical_name=node.canonical_name,
             topic_summary=c_info["short_topic"],
             plain_english=c_info["plain_english"],
+            source_agent_id=str(getattr(node, "source_agent_id", "system")),
         )
 
     rows: List[GraphRow] = []
@@ -714,65 +735,114 @@ def collect_graph_rows(
 
 
 def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
+    from context_palace.summarizer import get_category_shape
+
     th = get_theme(data.theme_mode)
     rows = collect_graph_rows(data, max_roots=max_roots)
-    table = Table.grid(expand=True, padding=(0, 1))
-    table.add_column(no_wrap=True, overflow="ellipsis", ratio=6)  # tree + name + 3-5w topic
-    table.add_column(no_wrap=True, overflow="ellipsis", ratio=2)  # category
-    table.add_column(no_wrap=True)  # conf
-    table.add_column(no_wrap=True, min_width=6)  # PINNED
-    table.add_column(no_wrap=True, overflow="ellipsis", ratio=2)  # provenance + quick actions
+
+    # Reasonable Viewing Order bar (clickable sort pills)
+    sort_bar = Text("VIEW ORDER:  ", style=th.s_label)
+    sort_options = (
+        ("pinned_recent", "1. ★ Pinned & Recent"),
+        ("recent", "2. Latest Updated"),
+        ("session", "3. By Session/Agent"),
+        ("category", "4. ▲ By Category"),
+    )
+    active_sort = getattr(data, "graph_sort_order", "pinned_recent")
+    for idx_s, (s_key, s_lbl) in enumerate(sort_options):
+        if idx_s:
+            sort_bar.append("  ", style=th.s_28)
+        pill_st = th.s_pill_on if s_key == active_sort else th.s_60
+        sort_bar.append(f"[ {s_lbl} ]", style=_click(pill_st, "set_sort_order", s_key))
+
+    legend = Text(
+        "NODE SHAPES:  ▲ Architecture   ● Config/Install   ★ Tool/Pipeline   ■ Decision/UX   ·  Click any shape to explain & edit",
+        style=th.s_45,
+    )
 
     if not rows:
-        table.add_row(
-            Text("(no active concepts)", style=_click(th.s_45, "create")),
-            "",
-            "",
-            "",
-            "",
+        empty_panel = Panel(
+            Text("(no active concepts) — Click [+ Create] or type in the bottom Agent Bar to add a topic", style=_click(th.s_45, "create")),
+            box=box.ROUNDED,
+            border_style=th.s_28,
+            padding=(0, 1),
         )
-    for r in rows:
-        cname = r.canonical_name or r.name.rstrip("/")
-        name = Text()
-        name.append(r.prefix, style=th.s_45)
-        if r.relation:
-            name.append(f"{r.relation}  ", style=th.s_60)
-        name_style = th.s_strong if r.is_root else th.s_ink
-        name.append(r.name, style=_click(name_style, "open_concept_crud", cname))
-        if r.topic_summary:
-            name.append(f"  · {r.topic_summary}", style=_click(th.s_60, "open_concept_crud", cname))
+        cards_renderable: RenderableType = empty_panel
+    else:
+        # Group rows into root node bundles (root + its 1-hop children)
+        bundles: List[Tuple[GraphRow, List[GraphRow]]] = []
+        for r in rows:
+            if r.is_root or not bundles:
+                bundles.append((r, []))
+            else:
+                bundles[-1][1].append(r)
 
-        pin_cell = Text()
-        if r.pinned:
-            pin_cell.append("PINNED", style=_click(th.s_strong, "quick_toggle_pin", cname))
-        else:
-            pin_cell.append("[pin]", style=_click(th.s_45, "quick_toggle_pin", cname))
+        selected_cname = data.selected_node_id or (bundles[0][0].canonical_name if bundles else None)
+        card_panels: List[RenderableType] = []
 
-        prov_cell = Text()
-        if r.provenance:
-            prov_cell.append(r.provenance, style=_click(th.s_60, "open_concept_crud", cname))
-            prov_cell.append(" ", style=th.s_45)
-        prov_cell.append("[edit]", style=_click(th.s_strong, "open_concept_crud", cname))
-        prov_cell.append(" ", style=th.s_45)
-        prov_cell.append("[×]", style=_click(th.s_45, "quick_delete_concept", cname))
+        for rank_idx, (root_r, child_rows) in enumerate(bundles, start=1):
+            cname = root_r.canonical_name or root_r.name.rstrip("/")
+            shape_icon, cat_label = get_category_shape(root_r.category)
+            is_selected = cname == selected_cname
 
-        table.add_row(
-            name,
-            Text(r.category, style=_click(th.s_60, "open_concept_crud", cname)),
-            Text(
-                "" if r.confidence is None else f"conf {r.confidence:.2f}",
-                style=_click(th.s_60, "open_concept_crud", cname),
-            ),
-            pin_cell,
-            prov_cell,
-        )
-        if r.is_root and r.value:
-            val_text = Text(
-                f"   = {_clip(r.value, 96)}",
-                style=_click(th.s_45, "open_concept_crud", cname),
+            # Line 1: Shape Icon + Rank + Pinned + Category + Canonical Slug + Quick Actions
+            top_line = Text()
+            top_line.append(f"{shape_icon} #{rank_idx} · ", style=_click(th.s_strong, "select_node", cname))
+            if root_r.pinned:
+                top_line.append("PINNED ★", style=_click(th.s_strong, "quick_toggle_pin", cname))
+            else:
+                top_line.append("[pin]", style=_click(th.s_45, "quick_toggle_pin", cname))
+            top_line.append(f" · {root_r.category}  ", style=_click(th.s_60, "select_node", cname))
+            top_line.append(root_r.name, style=_click(th.s_ink, "open_concept_crud", cname))
+            top_line.append("  [Explain & Edit]", style=_click(th.s_strong, "open_concept_crud", cname))
+            top_line.append(" ", style=th.s_45)
+            top_line.append("[×]", style=_click(th.s_45, "quick_delete_concept", cname))
+
+            # Line 2: Bold 3-5 Word Topic Title
+            title_line = Text(
+                f"  {root_r.topic_summary or cname}",
+                style=_click(th.s_strong, "select_node", cname),
+            )
+
+            # Line 3: Concise Plain-English Description / Value
+            val_line = Text(
+                f"  = {_clip(root_r.value, 88)}",
+                style=_click(th.s_ink if is_selected else th.s_60, "open_concept_crud", cname),
                 overflow="fold",
             )
-            table.add_row(val_text, "", "", "", "")
+
+            # Line 4: Session + Confidence + Provenance + Links
+            meta_line = Text("  ")
+            if root_r.source_agent_id:
+                meta_line.append(f"Session: {root_r.source_agent_id}  ·  ", style=_click(th.s_60, "select_node", cname))
+            if root_r.confidence is not None:
+                meta_line.append(f"conf {root_r.confidence:.2f}  ·  ", style=_click(th.s_60, "open_concept_crud", cname))
+            if root_r.provenance:
+                meta_line.append(f"{root_r.provenance}", style=_click(th.s_45, "open_concept_crud", cname))
+
+            card_lines: List[RenderableType] = [top_line, title_line, val_line, meta_line]
+            for ch in child_rows[:2]:
+                ch_cname = ch.canonical_name or ch.name
+                ch_line = Text("  ")
+                ch_line.append(ch.prefix, style=th.s_45)
+                if ch.relation:
+                    ch_line.append(f"{ch.relation}  ", style=th.s_60)
+                ch_line.append(ch.name, style=_click(th.s_ink, "open_concept_crud", ch_cname))
+                if ch.topic_summary:
+                    ch_line.append(f" ({ch.topic_summary})", style=_click(th.s_45, "open_concept_crud", ch_cname))
+                card_lines.append(ch_line)
+
+            border_st = th.s_strong if is_selected else (th.s_ink if root_r.pinned else th.s_28)
+            card_panels.append(
+                Panel(
+                    Group(*card_lines),
+                    box=box.ROUNDED,
+                    border_style=border_st,
+                    padding=(0, 1),
+                )
+            )
+
+        cards_renderable = Group(*card_panels)
 
     pinned = sum(1 for n in data.nodes if n.pinned)
     shown = sum(1 for r in rows if r.is_root)
@@ -792,38 +862,87 @@ def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
     graph_hint = Text()
     graph_hint.append("[+c Create]", style=_click(th.s_strong, "create"))
     graph_hint.append(" · ", style=th.s_45)
-    graph_hint.append("[u Edit]", style=_click(th.s_ink, "update"))
+    graph_hint.append("[o Sort Order]", style=_click(th.s_ink, "cycle_sort_order"))
     graph_hint.append(" · ", style=th.s_45)
-    graph_hint.append("[d Del]", style=_click(th.s_ink, "delete"))
-    graph_hint.append(" · 1-hop neighbourhood · pinned first", style=th.s_45)
+    graph_hint.append("Visual Node Shapes · Pinned First", style=th.s_45)
 
     return Group(
         pane_heading("Graph", graph_hint, theme=th, label_action="open_crud_hub"),
-        table,
-        Text(""),
+        sort_bar,
+        legend,
+        cards_renderable,
         footer,
     )
 
 
 # ---------------------------------------------------------------------------
-# AUDIT
+# AUDIT & SELECTED NODE EXPLANATION
 # ---------------------------------------------------------------------------
 def build_audit_pane(data: DashboardData, max_events: int = 3, max_chat_turns: int = 2) -> Group:
-    from context_palace.summarizer import get_session_topic_summary, summarize_concept
+    from context_palace.summarizer import explain_concept_node, get_session_topic_summary, summarize_concept
 
     th = get_theme(data.theme_mode)
     by_id = data.node_by_id
     audit_hint = Text()
-    audit_hint.append("topics · consensus · capsule · ", style=th.s_45)
-    audit_hint.append("[a] ask", style=_click(th.s_strong, "ask"))
+    audit_hint.append("node explanation · consensus · ", style=th.s_45)
+    audit_hint.append("[a] ask agent", style=_click(th.s_strong, "ask"))
     audit_hint.append(" · ", style=th.s_45)
     audit_hint.append("[p] inject", style=_click(th.s_ink, "pin_inject"))
 
     lines: List[RenderableType] = [pane_heading("Audit", audit_hint, theme=th, label_action="ask")]
 
-    # 1. Active Topics & Latest Belief Summaries (so you always see what topics are in Audit)
-    lines.append(Text("Active Topic Summaries (Latest Beliefs & Sessions)", style=th.s_ink))
+    # 0. Selected Node Explanation Box (so clicking any node immediately explains what it represents!)
     active_nodes = [n for n in data.nodes if not getattr(n, "tombstoned", False)]
+    selected_node = None
+    if data.selected_node_id:
+        selected_node = next(
+            (n for n in active_nodes if n.canonical_name == data.selected_node_id or n.node_id == data.selected_node_id),
+            None,
+        )
+    if selected_node is None and active_nodes:
+        selected_node = sorted(
+            active_nodes,
+            key=lambda n: (not bool(n.pinned), -float(n.confidence), -float(getattr(n, "updated_at", 0.0))),
+        )[0]
+
+    if selected_node is not None:
+        s_cname = selected_node.canonical_name
+        node_edges = [e for e in data.edges if e.source_id == selected_node.node_id or e.target_id == selected_node.node_id]
+        exp = explain_concept_node(
+            selected_node,
+            provenance=data.node_provenance.get(selected_node.node_id, "user_explicit"),
+            edges=node_edges,
+            node_by_id=by_id,
+        )
+        exp_lines: List[RenderableType] = [
+            Text(
+                f"SELECTED NODE EXPLANATION  ·  {exp['shape']} {exp['title']} ({s_cname})",
+                style=_click(th.s_strong, "open_concept_crud", s_cname),
+            ),
+            Text(f"• What this represents: {exp['what_it_is']}", style=th.s_ink, overflow="fold"),
+            Text(f"• Why it matters:       {exp['why_it_matters']}", style=th.s_60, overflow="fold"),
+            Text(f"• Origin & Graph Links: {exp['origin']}  ·  {exp['connections']}", style=th.s_45, overflow="fold"),
+        ]
+        act_bar = Text("  ")
+        act_bar.append("[ + Update in Plain English ]", style=_click(th.s_pill_on, "nl_edit_node", s_cname))
+        act_bar.append("   ", style=th.s_28)
+        act_bar.append("[ ✎ Pre-Populated Form ]", style=_click(th.s_strong, "open_concept_crud", s_cname))
+        act_bar.append("   ", style=th.s_28)
+        act_bar.append("[ ★ Toggle Pin ]", style=_click(th.s_ink, "quick_toggle_pin", s_cname))
+        act_bar.append("   ", style=th.s_28)
+        act_bar.append("[ × Delete ]", style=_click(th.s_45, "quick_delete_concept", s_cname))
+        exp_lines.append(act_bar)
+        lines.append(
+            Panel(
+                Group(*exp_lines),
+                box=box.ROUNDED,
+                border_style=th.s_strong,
+                padding=(0, 1),
+            )
+        )
+
+    # 1. Active Topics & Latest Belief Summaries
+    lines.append(Text("Active Topic Summaries (Latest Beliefs & Sessions)", style=th.s_ink))
     recent_nodes = sorted(
         active_nodes,
         key=lambda n: (-float(getattr(n, "updated_at", 0.0)), not bool(n.pinned), -float(n.confidence)),
@@ -839,7 +958,7 @@ def build_audit_pane(data: DashboardData, max_events: int = 3, max_chat_turns: i
             row_t = Text("  • ")
             row_t.append(
                 f"{c_info['short_topic']}",
-                style=_click(th.s_strong, "open_concept_crud", rn.canonical_name),
+                style=_click(th.s_strong, "select_node", rn.canonical_name),
             )
             row_t.append(
                 f" ({rn.canonical_name}) — {_clip(c_info['plain_english'], 52)}",

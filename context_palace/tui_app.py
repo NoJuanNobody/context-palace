@@ -24,6 +24,12 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
 
+from context_palace.summarizer import (
+    explain_concept_node,
+    get_category_shape,
+    summarize_3_to_5_words,
+    summarize_concept,
+)
 from context_palace.tui_view import (
     BG,
     DARK_BG,
@@ -262,16 +268,31 @@ class ConceptCrudScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
         with VerticalScroll(id="crud-modal-scroll"):
             yield Static(id="crud-header-bar")
-            yield Label("CANONICAL NAME", classes="crud-label")
+            yield Static(id="crud-explanation-box")
+            yield Label(
+                "1. UPDATE IN PLAIN ENGLISH (TERMINAL AGENT — NO FORM FILLING NEEDED)",
+                classes="crud-label",
+            )
+            yield Input(
+                value="",
+                placeholder='e.g. "Change belief to support Homebrew + curl, set confidence to 99%, and link to context_palace_cli"',
+                id="crud-nl-input",
+            )
+            yield Static(id="crud-nl-actions")
+            yield Label(
+                "2. AUTO-POPULATED FORM FIELDS (PRE-FILLED FROM SELECTED NODE — EDIT IF NEEDED)",
+                classes="crud-label",
+            )
+            yield Label("CANONICAL NAME  (unique concept key in the memory lake)", classes="crud-label")
             yield Input(value=name_val, id="crud-name")
-            yield Label("CATEGORY (architecture · decision · security · config · entity)", classes="crud-label")
+            yield Label("CATEGORY & SHAPE  (▲ architecture · ● config · ★ tool · ■ decision · ◆ general)", classes="crud-label")
             yield Input(value=cat_val, id="crud-category")
-            yield Label("ACTIVE BELIEF VALUE", classes="crud-label")
+            yield Label("ACTIVE BELIEF VALUE  (what this concept currently states is true)", classes="crud-label")
             yield Input(value=val_val, id="crud-value")
-            yield Label("CONFIDENCE (0.00 - 1.00)  &  SUMMARY", classes="crud-label")
+            yield Label("CONFIDENCE SCORE (0.00 - 1.00)  &  SHORT TOPIC SUMMARY", classes="crud-label")
             yield Input(value=conf_val, id="crud-confidence")
-            yield Input(value=sum_val, placeholder="Optional summary", id="crud-summary")
-            yield Label("ADD RELATIONSHIP EDGE (OPTIONAL: TARGET CONCEPT  |  RELATION TYPE)", classes="crud-label")
+            yield Input(value=sum_val, placeholder="Auto-generated 3-5 word summary if left blank", id="crud-summary")
+            yield Label("ADD GRAPH CONNECTION  (target concept name  &  relationship type)", classes="crud-label")
             yield Input(value="", placeholder="Target concept name (e.g. ed25519_key_rotation)", id="crud-edge-target")
             yield Input(value="related_to", placeholder="Relation type (e.g. configures, depends_on)", id="crud-edge-rel")
             yield Static(id="crud-buttons-bar")
@@ -283,24 +304,98 @@ class ConceptCrudScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if self.is_create:
             self.query_one("#crud-name", Input).focus()
         else:
-            self.query_one("#crud-value", Input).focus()
+            self.query_one("#crud-nl-input", Input).focus()
 
     def _refresh_chrome(self) -> None:
+        from rich import box
+        from rich.panel import Panel
+
         th = get_theme(self.theme_mode)
-        mode_title = "CREATE NEW CONCEPT" if self.is_create else f"CRUD INSPECTOR · {getattr(self.node_obj, 'canonical_name', self.target)}"
+        cname = getattr(self.node_obj, "canonical_name", self.target) if self.node_obj else self.target
+        cat = getattr(self.node_obj, "category", "architecture") if self.node_obj else "architecture"
+        shape, _cat_lbl = get_category_shape(cat)
+        mode_title = (
+            "CREATE NEW CONCEPT NODE"
+            if self.is_create
+            else f"{shape} SELECTED NODE EXPLANATION & INSPECTOR · {cname}"
+        )
         head = Table.grid(expand=True)
         head.add_column(justify="left")
         head.add_column(justify="right")
-        pin_lbl = "📌 PINNED: YES" if self.pinned_state else "📌 PINNED: NO"
+        pin_lbl = "★ PINNED: YES" if self.pinned_state else "☆ PINNED: NO"
         right = Text()
         right.append(f"[ {pin_lbl} ]", style=_modal_click(th.s_pill_on if self.pinned_state else th.s_ink, "toggle_pin"))
         right.append("  ")
-        right.append("[ × Close ]", style=_modal_click(th.s_ink, "cancel"))
+        right.append("[ × Close (Esc) ]", style=_modal_click(th.s_ink, "cancel"))
         head.add_row(Text(mode_title, style=th.s_strong), right)
         self.query_one("#crud-header-bar", Static).update(head)
 
+        # Build plain-English explanation box
+        if not self.is_create and self.node_obj is not None:
+            edges = (
+                list(self.tui.lake.list_edges(node_id=self.node_obj.node_id, active_only=True))
+                if hasattr(self.tui.lake, "list_edges")
+                else []
+            )
+            revs = (
+                list(self.tui.lake.get_belief_history(self.node_obj.node_id))
+                if hasattr(self.tui.lake, "get_belief_history")
+                else []
+            )
+            node_map = {
+                n.node_id: n
+                for n in (
+                    self.tui.lake.list_concepts(include_tombstoned=True)
+                    if hasattr(self.tui.lake, "list_concepts")
+                    else []
+                )
+            }
+            prov = revs[-1].provenance_type if revs else "agent_turn"
+            expl = explain_concept_node(
+                node=self.node_obj,
+                provenance=prov,
+                revision_count=max(1, len(revs)),
+                edges=edges,
+                node_by_id=node_map,
+            )
+            exp_lines = [
+                Text.assemble(
+                    (f"{expl['shape']} {expl['title']}  ", th.s_strong),
+                    (f"[{self.node_obj.category.upper()} · {int(round(self.node_obj.confidence * 100))}% confidence]", th.s_60),
+                ),
+                Text.assemble(("• What this node is: ", th.s_strong), (expl["what_it_is"], th.s_ink)),
+                Text.assemble(("• Why it matters:    ", th.s_strong), (expl["why_it_matters"], th.s_60)),
+                Text.assemble(("• Recorded by:       ", th.s_strong), (expl["origin"], th.s_60)),
+                Text.assemble(("• Graph links:       ", th.s_strong), (expl["connections"], th.s_60)),
+            ]
+            self.query_one("#crud-explanation-box", Static).update(
+                Panel(
+                    Group(*exp_lines),
+                    title=Text(" WHAT THIS NODE REPRESENTS ", style=th.s_strong),
+                    title_align="left",
+                    border_style=th.s_45,
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+            )
+        else:
+            self.query_one("#crud-explanation-box", Static).update(
+                Text("Describe a new concept below in plain English or fill the form fields.", style=th.s_60)
+            )
+
+        nl_btns = Text()
+        nl_btns.append(
+            "[ ↵ Apply Plain-English Update ]",
+            style=_modal_click(th.s_pill_on, "apply_nl"),
+        )
+        nl_btns.append(
+            '   Examples: "set value to ...", "confidence 99%", "pin this", "link to X"',
+            style=th.s_45,
+        )
+        self.query_one("#crud-nl-actions", Static).update(Group(nl_btns, Text("")))
+
         btns = Text()
-        save_lbl = "[ + Create Concept ]" if self.is_create else "[ 💾 Save / Update ]"
+        save_lbl = "[ + Create Concept ]" if self.is_create else "[ 💾 Save Form Changes ]"
         btns.append(save_lbl, style=_modal_click(th.s_pill_on, "save"))
         btns.append("  ")
         btns.append("[ 💉 Pin & Inject Capsule ]", style=_modal_click(th.s_strong, "pin_and_inject"))
@@ -378,7 +473,17 @@ class ConceptCrudScreen(ModalScreen[Optional[Dict[str, Any]]]):
         }
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "crud-nl-input" and event.input.value.strip():
+            self.action_apply_nl()
+            return
         self.action_save()
+
+    def action_apply_nl(self) -> None:
+        nl_text = self.query_one("#crud-nl-input", Input).value.strip()
+        if not nl_text:
+            return
+        default_name = getattr(self.node_obj, "canonical_name", self.target) if self.node_obj else self.target
+        self.dismiss({"op": "nl", "instruction": nl_text, "default_node_name": default_name})
 
     def action_toggle_pin(self) -> None:
         self.pinned_state = not self.pinned_state
@@ -496,6 +601,9 @@ class AgentCrudScreen(ModalScreen[Optional[Dict[str, Any]]]):
         )
 
     def compose(self) -> ComposeResult:
+        from rich import box
+        from rich.panel import Panel
+
         th = get_theme(self.theme_mode)
         aid = self.sess.agent_id if self.sess else self.agent_id
         harness = self.sess.harness_type if self.sess else "antigravity"
@@ -503,9 +611,54 @@ class AgentCrudScreen(ModalScreen[Optional[Dict[str, Any]]]):
         used = str(self.sess.used_tokens) if self.sess else "0"
         max_tok = str(self.sess.max_context_tokens) if self.sess else "1000000"
 
-        title = f"AGENT SESSION CRUD · {aid}" if aid else "REGISTER NEW AGENT SESSION"
+        title = f"AGENT SESSION INSPECTOR & CRUD · {aid}" if aid else "REGISTER NEW AGENT SESSION"
         with Vertical():
             yield Label(title, classes="prompt-title")
+            if self.sess is not None:
+                nodes = (
+                    list(self.tui.lake.list_concepts(include_tombstoned=False))
+                    if hasattr(self.tui.lake, "list_concepts")
+                    else []
+                )
+                owned = [n for n in nodes if n.source_agent_id == aid]
+                owned.sort(key=lambda n: n.updated_at, reverse=True)
+                latest_text = owned[0].active_value if owned else f"{harness} {model} session"
+                topic_3_5 = summarize_3_to_5_words(latest_text, fallback=aid)
+                headroom = max(0, self.sess.max_context_tokens - self.sess.used_tokens)
+                status_explain = (
+                    "HEALTHY — plenty of context window headroom remaining."
+                    if not self.sess.needs_compaction
+                    else "NEEDS COMPACTION — over 75% of context window used; click Compact below."
+                )
+                sess_lines = [
+                    Text.assemble(("• Latest Topic (3–5w): ", th.s_strong), (topic_3_5, th.s_ink)),
+                    Text.assemble(
+                        ("• Latest Activity:     ", th.s_strong),
+                        (latest_text[:72], th.s_60),
+                    ),
+                    Text.assemble(
+                        ("• Window Health:       ", th.s_strong),
+                        (
+                            f"{self.sess.utilization_pct:.2f}% used ({headroom:,} tokens free) — {status_explain}",
+                            th.s_60,
+                        ),
+                    ),
+                    Text.assemble(
+                        ("• Concepts Recorded:   ", th.s_strong),
+                        (f"{len(owned)} active concept node(s) in the lake", th.s_60),
+                    ),
+                ]
+                yield Static(
+                    Panel(
+                        Group(*sess_lines),
+                        title=Text(" WHAT THIS SESSION REPRESENTS ", style=th.s_strong),
+                        title_align="left",
+                        border_style=th.s_45,
+                        box=box.ROUNDED,
+                        padding=(0, 1),
+                    )
+                )
+            yield Label("AUTO-POPULATED SESSION FIELDS (EDIT BELOW IF NEEDED)", classes="crud-label")
             yield Label("AGENT ID", classes="crud-label")
             yield Input(value=aid, id="agent-id")
             yield Label("HARNESS TYPE (antigravity · claude-code · codex · ollama)", classes="crud-label")
@@ -968,6 +1121,27 @@ class ContextPalaceApp(App[None]):
     Screen.theme-light .pane Static {{
         background: {LIGHT_BG};
     }}
+    #nl-agent-bar {{
+        height: auto;
+        border-top: solid {DARK_INK_16};
+        padding: 0;
+        background: {DARK_BG};
+    }}
+    Screen.theme-light #nl-agent-bar {{
+        border-top: solid {LIGHT_INK_16};
+        background: {LIGHT_BG};
+    }}
+    #nl-agent-input {{
+        background: {DARK_BG};
+        color: {DARK_INK};
+        border: none;
+        height: 1;
+        padding: 0 1;
+    }}
+    Screen.theme-light #nl-agent-input {{
+        background: {LIGHT_BG};
+        color: {LIGHT_INK};
+    }}
     #statusbar {{
         height: auto;
         border-top: solid {DARK_INK_16};
@@ -998,6 +1172,9 @@ class ContextPalaceApp(App[None]):
         Binding("p", "pin_inject", "Pin & Inject"),
         Binding("m", "models", "Models"),
         Binding("t", "time_travel", "Time-Travel"),
+        Binding("o", "cycle_sort_order", "Order"),
+        Binding("slash", "focus_nl_agent", "NL Agent", show=False),
+        Binding("escape", "blur_nl_agent", "Blur", show=False),
         Binding("k", "toggle_theme", "Theme"),
         Binding("g", "open_crud_hub", "CRUD Hub", show=False),
         Binding("q", "quit", "Quit"),
@@ -1034,14 +1211,40 @@ class ContextPalaceApp(App[None]):
                     yield Static(id="graph")
                 with VerticalScroll(classes="pane", id="pane-audit"):
                     yield Static(id="audit")
+            with Container(id="nl-agent-bar"):
+                yield Input(
+                    value="",
+                    placeholder='palace-agent > Type any update or question in plain English and press Enter (e.g. "Change one_click_install to support brew + curl and set confidence 99%")',
+                    id="nl-agent-input",
+                )
             yield Static(id="statusbar")
 
     def on_mount(self) -> None:
         self._sync_theme_class()
         self._apply_breakpoint(self.size.width)
+        self.set_focus(None)
         self.refresh_panes()
         if self.refresh_seconds and self.refresh_seconds > 0:
             self.set_interval(self.refresh_seconds, self.refresh_panes)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "nl-agent-input":
+            instruction = event.input.value.strip()
+            event.input.value = ""
+            self.set_focus(None)
+            if not instruction:
+                return
+            self._run(
+                "nl",
+                {
+                    "instruction": instruction,
+                    "default_node_name": getattr(self.tui, "selected_node_id", None) or "",
+                },
+                lambda r: [
+                    f"palace-agent > {instruction}",
+                    f"  → {r.get('reply', 'Updated')}",
+                ],
+            )
 
     def on_resize(self, event: Any) -> None:
         self._apply_breakpoint(event.size.width)
@@ -1125,12 +1328,60 @@ class ContextPalaceApp(App[None]):
             "p": self.action_pin_inject,
             "m": self.action_models,
             "t": self.action_time_travel,
+            "o": self.action_cycle_sort_order,
             "k": self.action_toggle_theme,
             "q": self.action_quit,
         }
         fn = dispatch.get(key.lower())
         if fn is not None:
             fn()
+
+    def action_focus_nl_agent(self) -> None:
+        try:
+            self.query_one("#nl-agent-input", Input).focus()
+        except Exception:
+            pass
+
+    def action_blur_nl_agent(self) -> None:
+        self.set_focus(None)
+
+    def action_select_node(self, node_id_or_name: str) -> None:
+        """Select a node shape card and show its plain-English explanation in AUDIT without opening a raw form."""
+        self.tui.selected_node_id = node_id_or_name
+        self.tui.status_message = (
+            f"Selected '{node_id_or_name}' — see plain-English explanation in AUDIT (or click [✎ Form] / type below)"
+        )
+        self.refresh_panes()
+
+    def action_set_sort_order(self, order: str) -> None:
+        """Set the GRAPH viewing order ('pinned_recent', 'recent', 'session', 'category')."""
+        self._run(
+            "o",
+            {"order": order},
+            lambda r: [f"palace$ order → {r.get('sort_order', order)}"],
+        )
+
+    def action_cycle_sort_order(self) -> None:
+        """Cycle the GRAPH viewing order."""
+        self._run(
+            "o",
+            {},
+            lambda r: [f"palace$ order → {r.get('sort_order', 'pinned_recent')}"],
+        )
+
+    def action_nl_edit_node(self, node_id_or_name: str) -> None:
+        """Target a node for natural-language terminal agent editing in the bottom bar."""
+        self.tui.selected_node_id = node_id_or_name
+        self.tui.status_message = f"Terminal Agent targeting '{node_id_or_name}' — describe what to change and press Enter"
+        self.refresh_panes()
+        try:
+            inp = self.query_one("#nl-agent-input", Input)
+            inp.placeholder = (
+                f'palace-agent ({node_id_or_name}) > Describe what to change in plain English and press Enter...'
+            )
+            inp.focus()
+        except Exception:
+            pass
 
     def action_toggle_theme(self) -> None:
         self._run(
@@ -1207,6 +1458,17 @@ class ContextPalaceApp(App[None]):
             elif op == "time_travel":
                 as_of = res.get("as_of")
                 self._run("t", {"as_of": as_of}, lambda r: [f"palace$ t {r['as_of']}"])
+            elif op == "nl":
+                instr = res.get("instruction", "")
+                def_node = res.get("default_node_name", "")
+                self._run(
+                    "nl",
+                    {"instruction": instr, "default_node_name": def_node},
+                    lambda r: [
+                        f"palace-agent ({def_node}) > {instr}",
+                        f"  → {r.get('reply', 'Updated')}",
+                    ],
+                )
 
         self.push_screen(
             ConceptCrudScreen(
