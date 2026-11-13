@@ -38,11 +38,9 @@ as a scrollable view; `esc` returns to the palace:
 
 ![Context Palace v2 List All](docs/screenshots/tui_v2_list_all.png)
 
-Preview it on synthetic data without touching your real lake:
+Render a TUI screenshot (SVG / PNG):
 
 ```bash
-python scripts/seed_demo_lake.py /tmp/cp_demo.db
-context-palace --db /tmp/cp_demo.db tui
 python scripts/render_tui_screenshot.py out/tui.svg --png out/tui.png            # [--list-all] for the inventory view
 ```
 

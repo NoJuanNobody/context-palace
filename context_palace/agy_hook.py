@@ -156,41 +156,46 @@ def handle_agy_hook_payload(
         return {"injectSteps": [], "terminationBehavior": ""}
 
     if event_name == "PostInvocation":
-        # Incrementally extract new turns from transcriptPath into the Context Lake
+        # Update live session token/turn telemetry; only run regex concept ingestion when explicitly requested
+        # (or on non-brain test transcripts), preventing chat summary bullets from polluting the live lake.
         if transcript_path and os.path.exists(str(transcript_path)):
-            turns_list: List[Dict[str, Any]] = []
-            try:
-                with open(str(transcript_path), "r", encoding="utf-8", errors="replace") as fh:
-                    for idx, raw_line in enumerate(fh, start=1):
-                        raw_line = raw_line.strip()
-                        if not raw_line:
-                            continue
-                        try:
-                            obj = json.loads(raw_line)
-                            if isinstance(obj, dict):
-                                step_type = str(obj.get("type") or "")
-                                if step_type and step_type not in ("USER_INPUT", "PLANNER_RESPONSE", ""):
-                                    continue
-                                content_val = obj.get("content") or ""
-                                if content_val and len(str(content_val)) <= 6000:
-                                    turns_list.append(
-                                        {
-                                            "turn_id": idx,
-                                            "role": obj.get("source") or step_type or "agent_turn",
-                                            "content": str(content_val),
-                                        }
-                                    )
-                        except Exception:
-                            continue
-            except OSError:
-                turns_list = []
+            tp_parts = Path(str(transcript_path)).parts
+            should_ingest_concepts = bool(payload.get("ingestConcepts")) or ("brain" not in tp_parts)
+            if should_ingest_concepts:
+                turns_list: List[Dict[str, Any]] = []
+                try:
+                    with open(str(transcript_path), "r", encoding="utf-8", errors="replace") as fh:
+                        for idx, raw_line in enumerate(fh, start=1):
+                            raw_line = raw_line.strip()
+                            if not raw_line:
+                                continue
+                            try:
+                                obj = json.loads(raw_line)
+                                if isinstance(obj, dict):
+                                    step_type = str(obj.get("type") or "")
+                                    if step_type and step_type not in ("USER_INPUT", "PLANNER_RESPONSE", ""):
+                                        continue
+                                    content_val = obj.get("content") or ""
+                                    if content_val and len(str(content_val)) <= 6000:
+                                        turns_list.append(
+                                            {
+                                                "turn_id": idx,
+                                                "role": obj.get("source") or step_type or "agent_turn",
+                                                "content": str(content_val),
+                                            }
+                                        )
+                            except Exception:
+                                continue
+                except OSError:
+                    turns_list = []
 
-            if turns_list:
-                extractor.ingest_turns(lake=lake, session=session, turns=turns_list)
-                if not is_headless_subagent:
-                    lake.upsert_agent_session(session)
-                elif hasattr(lake, "delete_agent_session"):
-                    lake.delete_agent_session(session.agent_id)
+                if turns_list:
+                    extractor.ingest_turns(lake=lake, session=session, turns=turns_list)
+
+            if not is_headless_subagent:
+                lake.upsert_agent_session(session)
+            elif hasattr(lake, "delete_agent_session"):
+                lake.delete_agent_session(session.agent_id)
         return {"injectSteps": [], "terminationBehavior": ""}
 
     if event_name == "PostToolUse":
