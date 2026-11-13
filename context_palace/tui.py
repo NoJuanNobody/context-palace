@@ -298,13 +298,23 @@ class MemoryPalaceTUI:
         self.last_output: List[str] = []
 
     def _fetch_agent_sessions(self) -> List[AgentSession]:
+        raw: List[AgentSession] = []
         if hasattr(self.lake, "list_agent_sessions"):
             sessions = self.lake.list_agent_sessions()
-            return list(sessions) if sessions else []
-        if hasattr(self.lake, "get_agent_sessions"):
+            raw = list(sessions) if sessions else []
+        elif hasattr(self.lake, "get_agent_sessions"):
             sessions = self.lake.get_agent_sessions()
-            return list(sessions) if sessions else []
-        return []
+            raw = list(sessions) if sessions else []
+
+        cleaned: List[AgentSession] = []
+        for s in raw:
+            tp = str(s.transcript_path or "")
+            if "/chunks/" in tp:
+                continue
+            if s.agent_id.startswith("session-") and s.harness_type == "conversation" and not tp:
+                continue
+            cleaned.append(s)
+        return cleaned
 
     def _fetch_concepts_and_edges(
         self,
@@ -817,7 +827,7 @@ class MemoryPalaceTUI:
                         harness_type="antigravity",
                         model_id="gemini-4-argon",
                         max_context_tokens=1_000_000,
-                        used_tokens=50_000,
+                        used_tokens=0,
                     )
                 capsule = _call_compatible(
                     self.retriever.build_context_capsule,

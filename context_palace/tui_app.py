@@ -500,7 +500,7 @@ class AgentCrudScreen(ModalScreen[Optional[Dict[str, Any]]]):
         aid = self.sess.agent_id if self.sess else self.agent_id
         harness = self.sess.harness_type if self.sess else "antigravity"
         model = self.sess.model_id if self.sess else "gemini-4-argon"
-        used = str(self.sess.used_tokens) if self.sess else "42000"
+        used = str(self.sess.used_tokens) if self.sess else "0"
         max_tok = str(self.sess.max_context_tokens) if self.sess else "1000000"
 
         title = f"AGENT SESSION CRUD · {aid}" if aid else "REGISTER NEW AGENT SESSION"

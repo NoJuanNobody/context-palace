@@ -85,21 +85,22 @@ class ConversationalMemoryPalace:
 
         self._ensure_interface_compatibility()
 
-        # Automatically register or update agent_sessions row in self.lake
-        existing_session = self.lake.get_agent_session(self.session_id)
-        if existing_session is None:
-            spec = self.registry.resolve_model_window(self.model_id)
-            new_session = AgentSession(
-                agent_id=self.session_id,
-                harness_type="conversation",
-                model_id=self.model_id,
-                max_context_tokens=spec.max_context_tokens,
-                used_tokens=0,
-                last_processed_turn=0,
-                updated_at=time.time(),
-                metadata={"agent_name": self.agent_name},
-            )
-            self.lake.upsert_agent_session(new_session)
+        # Only register an agent_sessions row when an explicit session_id and persist_turns=True are requested
+        if session_id is not None and self.persist_turns:
+            existing_session = self.lake.get_agent_session(self.session_id)
+            if existing_session is None:
+                spec = self.registry.resolve_model_window(self.model_id)
+                new_session = AgentSession(
+                    agent_id=self.session_id,
+                    harness_type="conversation",
+                    model_id=self.model_id,
+                    max_context_tokens=spec.max_context_tokens,
+                    used_tokens=0,
+                    last_processed_turn=0,
+                    updated_at=time.time(),
+                    metadata={"agent_name": self.agent_name},
+                )
+                self.lake.upsert_agent_session(new_session)
 
     def _ensure_interface_compatibility(self) -> None:
         """Dynamically attach bridge helpers if missing on collaborator instances."""

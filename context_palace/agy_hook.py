@@ -58,7 +58,16 @@ def handle_agy_hook_payload(
 
     # Resolve or detect session and its model context window
     existing_session = lake.get_agent_session(agent_id)
+    is_headless_subagent = False
     if transcript_path and os.path.exists(str(transcript_path)):
+        tp_obj = Path(str(transcript_path))
+        if "brain" in tp_obj.parts:
+            try:
+                raw_tp = tp_obj.read_text(encoding="utf-8", errors="ignore")
+                if raw_tp.strip() and '"USER_INPUT"' not in raw_tp:
+                    is_headless_subagent = True
+            except OSError:
+                pass
         detected = registry.detect_agent_session_from_file(
             str(transcript_path), agent_id=agent_id
         )
@@ -69,7 +78,7 @@ def handle_agy_hook_payload(
         detected.last_processed_turn = (
             existing_session.last_processed_turn if existing_session is not None else 0
         )
-        session = lake.upsert_agent_session(detected)
+        session = detected if is_headless_subagent else lake.upsert_agent_session(detected)
     else:
         effective_model = (
             model_name
@@ -87,7 +96,8 @@ def handle_agy_hook_payload(
             last_processed_turn=existing_session.last_processed_turn if existing_session else 0,
             updated_at=time.time(),
         )
-        lake.upsert_agent_session(session)
+        if not is_headless_subagent and (existing_session is not None or transcript_path or event_name == "SessionStart"):
+            lake.upsert_agent_session(session)
 
     if event_name == "SessionStart":
         capsule = retriever.build_context_capsule(
@@ -177,7 +187,10 @@ def handle_agy_hook_payload(
 
             if turns_list:
                 extractor.ingest_turns(lake=lake, session=session, turns=turns_list)
-                lake.upsert_agent_session(session)
+                if not is_headless_subagent:
+                    lake.upsert_agent_session(session)
+                elif hasattr(lake, "delete_agent_session"):
+                    lake.delete_agent_session(session.agent_id)
         return {"injectSteps": [], "terminationBehavior": ""}
 
     if event_name == "PostToolUse":

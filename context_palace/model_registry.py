@@ -551,7 +551,8 @@ class ModelContextRegistry:
             idx = parts.index("brain")
             if idx + 1 < len(parts):
                 conv_id = parts[idx + 1][:8]
-                return f"{harness_type}-{conv_id}"
+                prefix = "agy" if harness_type == "antigravity" else harness_type
+                return f"{prefix}-{conv_id}"
         stem = file_path.stem
         if stem == "transcript" and file_path.parent.name:
             return f"{harness_type}-{file_path.parent.name[:8]}"
@@ -564,7 +565,8 @@ class ModelContextRegistry:
     ) -> List[AgentSession]:
         """
         Scan local agent directories (e.g. ~/.gemini/antigravity-cli/brain and ~/.claude/projects)
-        for recent transcript files and return their live AgentSession states.
+        for recent primary transcript files (excluding internal chunk files and headless subagents)
+        and return their live AgentSession states.
         """
         if search_dirs is None:
             default_dirs = [
@@ -582,9 +584,17 @@ class ModelContextRegistry:
                 candidates.append(root)
                 continue
             for p in root.rglob("*.jsonl"):
-                # Prefer compact transcript.jsonl over transcript_full.jsonl to avoid duplicates
-                if p.name == "transcript_full.jsonl":
+                # Skip internal chunk slices and transcript_full duplicates
+                if "chunks" in p.parts or p.name == "transcript_full.jsonl":
                     continue
+                # For Antigravity brain directories, skip headless subagent transcripts (no USER_INPUT)
+                if "brain" in p.parts and p.name == "transcript.jsonl":
+                    try:
+                        txt = p.read_text(encoding="utf-8", errors="ignore")
+                        if '"USER_INPUT"' not in txt:
+                            continue
+                    except OSError:
+                        continue
                 candidates.append(p)
 
         # Sort by modification time descending
@@ -598,7 +608,7 @@ class ModelContextRegistry:
             try:
                 sess = self.detect_agent_session_from_file(str(cand))
                 if sess.agent_id in seen_ids:
-                    sess.agent_id = f"{sess.agent_id}-{len(sessions) + 1}"
+                    continue
                 seen_ids.add(sess.agent_id)
                 sessions.append(sess)
             except Exception:
