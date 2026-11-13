@@ -182,6 +182,15 @@ class ContextLake:
         ).fetchall()
         return [self._row_to_agent_session(r) for r in rows]
 
+    def delete_agent_session(self, agent_id: str) -> bool:
+        if not agent_id:
+            return False
+        cur = self._conn.execute(
+            "DELETE FROM agent_sessions WHERE agent_id = ?", (agent_id.strip(),)
+        )
+        self._conn.commit()
+        return (cur.rowcount or 0) > 0
+
     @staticmethod
     def _row_to_agent_session(row: sqlite3.Row) -> AgentSession:
         try:
@@ -331,15 +340,19 @@ class ContextLake:
         turn_id: int = 0,
         pinned: Optional[bool] = None,
         timestamp: Optional[float] = None,
+        category: Optional[str] = None,
+        canonical_name: Optional[str] = None,
     ) -> ConceptNode:
         existing = self.get_concept(node_id_or_name, include_tombstoned=True)
         if existing is None:
             raise KeyError(f"Concept not found: {node_id_or_name}")
 
         ts = timestamp if timestamp is not None else time.time()
-        new_summary = summary if summary is not None else f"{existing.canonical_name}: {new_value[:120]}"
+        new_name = (canonical_name.strip() if canonical_name and canonical_name.strip() else existing.canonical_name)
+        new_category = (category.strip() if category and category.strip() else existing.category)
+        new_summary = summary if summary is not None else f"{new_name}: {new_value[:120]}"
         new_pinned = existing.pinned if pinned is None else bool(pinned)
-        new_emb = compute_text_embedding(f"{existing.canonical_name} {new_value} {new_summary}")
+        new_emb = compute_text_embedding(f"{new_name} {new_value} {new_summary}")
 
         new_rev = BeliefRevision(
             revision_id=f"rev-{uuid.uuid4().hex[:10]}",
@@ -375,7 +388,9 @@ class ContextLake:
         self._conn.execute(
             """
             UPDATE concept_nodes
-            SET active_value = ?,
+            SET canonical_name = ?,
+                category = ?,
+                active_value = ?,
                 summary = ?,
                 confidence = ?,
                 pinned = ?,
@@ -386,6 +401,8 @@ class ContextLake:
             WHERE node_id = ?
             """,
             (
+                new_name,
+                new_category,
                 new_value,
                 new_summary,
                 confidence,
@@ -544,6 +561,20 @@ class ContextLake:
             tuple(params),
         ).fetchall()
         return [self._row_to_edge(r) for r in rows]
+
+    def delete_edge(self, edge_id: str, hard: bool = False, timestamp: Optional[float] = None) -> bool:
+        if not edge_id:
+            return False
+        ts = timestamp if timestamp is not None else time.time()
+        if hard:
+            cur = self._conn.execute("DELETE FROM relation_edges WHERE edge_id = ?", (edge_id.strip(),))
+        else:
+            cur = self._conn.execute(
+                "UPDATE relation_edges SET valid_to = ? WHERE edge_id = ? AND valid_to IS NULL",
+                (ts, edge_id.strip()),
+            )
+        self._conn.commit()
+        return (cur.rowcount or 0) > 0
 
     @staticmethod
     def _row_to_edge(row: sqlite3.Row) -> RelationEdge:

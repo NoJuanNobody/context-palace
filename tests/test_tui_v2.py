@@ -248,10 +248,63 @@ def test_textual_screenshot_svg(demo: dict, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("NO_COLOR", raising=False)
 
     async def scenario(app: ContextPalaceApp, pilot: Any) -> None:
-        svg = app.export_screenshot()
-        assert svg.startswith("<svg")
-        assert "WINDOWS" in svg and "AUDIT" in svg
-        assert "#e8efe6" in svg.lower()  # sage background token survives into the render
+        svg_dark = app.export_screenshot()
+        assert svg_dark.startswith("<svg")
+        assert "WINDOWS" in svg_dark and "AUDIT" in svg_dark
+        assert "#0d1210" in svg_dark.lower()  # default dark mode obsidian background token
+
+        # Toggle to light mode via 'k' hotkey and verify sage background token
+        await pilot.press("k")
+        await pilot.pause()
+        svg_light = app.export_screenshot()
+        assert "#e8efe6" in svg_light.lower()
+
+    _run_app(demo, scenario)
+
+
+def test_textual_clickable_crud_modals_and_actions(demo: dict) -> None:
+    from context_palace.tui_app import AgentCrudScreen, ConceptCrudScreen, CrudHubScreen
+
+    lake = demo["lake"]
+
+    async def scenario(app: ContextPalaceApp, pilot: Any) -> None:
+        # 1. Click a concept in GRAPH -> opens ConceptCrudScreen -> update belief value & add edge
+        app.action_open_concept_crud("auth_strategy")
+        await pilot.pause()
+        assert isinstance(app.screen, ConceptCrudScreen)
+        val_input = app.screen.query_one("#crud-value")
+        val_input.value = "Zero-trust Ed25519 + mTLS"
+        edge_tgt = app.screen.query_one("#crud-edge-target")
+        edge_tgt.value = "mcp_server"
+        app.screen.action_save()
+        await pilot.pause()
+        assert lake.get_concept("auth_strategy").active_value == "Zero-trust Ed25519 + mTLS"
+
+        # 2. Quick toggle pin & quick delete via clickable actions
+        orig_pin = lake.get_concept("mcp_server").pinned
+        app.action_quick_toggle_pin("mcp_server")
+        await pilot.pause()
+        assert lake.get_concept("mcp_server").pinned is (not orig_pin)
+
+        # 3. Click an agent row -> opens AgentCrudScreen -> update used tokens
+        app.action_manage_agent("claude-code-dev")
+        await pilot.pause()
+        assert isinstance(app.screen, AgentCrudScreen)
+        app.screen.query_one("#agent-used").value = "95000"
+        app.screen.action_save()
+        await pilot.pause()
+        assert lake.get_agent_session("claude-code-dev").used_tokens == 95000
+
+        # 4. Open CRUD Manager Hub -> soft delete a concept and restore it
+        app.action_open_crud_hub()
+        await pilot.pause()
+        assert isinstance(app.screen, CrudHubScreen)
+        app.screen.action_soft_del("mcp_server")
+        assert lake.get_concept("mcp_server") is None
+        app.screen.action_restore_concept("mcp_server")
+        assert lake.get_concept("mcp_server") is not None
+        app.screen.action_close()
+        await pilot.pause()
 
     _run_app(demo, scenario)
 

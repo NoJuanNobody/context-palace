@@ -283,10 +283,12 @@ class MemoryPalaceTUI:
         lake: Any,
         retriever: Optional[Any] = None,
         registry: Optional[Any] = None,
+        theme_mode: str = "dark",
     ) -> None:
         self.lake = lake
         self.retriever = retriever
         self.registry = registry
+        self.theme_mode: str = theme_mode if theme_mode in ("dark", "light") else "dark"
         self.as_of: Optional[float] = None
         self.selected_agent_id: Optional[str] = None
         self.selected_node_id: Optional[str] = None
@@ -466,6 +468,7 @@ class MemoryPalaceTUI:
             chat_history=list(self.chat_history),
             frontend=frontend,
             size=size,
+            theme_mode=self.theme_mode,
         )
 
     def render_dashboard(
@@ -596,7 +599,7 @@ class MemoryPalaceTUI:
             }
 
         # Delegate single-character actions to execute_key_action
-        if action in ("c", "r", "u", "d", "p", "m", "t"):
+        if action in ("c", "r", "u", "d", "p", "m", "t", "k", "theme", "e", "s"):
             payload: Dict[str, Any] = {}
             if action == "c":
                 c_parts = arg.split(maxsplit=2)
@@ -611,6 +614,10 @@ class MemoryPalaceTUI:
                 payload["new_value"] = u_parts[1] if len(u_parts) > 1 else ""
             elif action == "t":
                 payload["as_of"] = float(arg.strip()) if arg.strip() else None
+            elif action in ("k", "theme"):
+                action = "k"
+                if arg.strip().lower() in ("dark", "light"):
+                    payload["theme_mode"] = arg.strip().lower()
             return self.execute_key_action(action, payload)
 
         return {"status": "error", "message": f"Unknown command: {cmd_str}"}
@@ -668,11 +675,23 @@ class MemoryPalaceTUI:
                 kwargs["timestamp"] = float(timestamp)
 
             node = _call_compatible(self.lake.create_concept, **kwargs)
+            edge_target = (payload.get("edge_target") or "").strip()
+            edge_relation = (payload.get("edge_relation") or "related_to").strip() or "related_to"
+            edge_obj = None
+            if edge_target and hasattr(self.lake, "add_edge"):
+                edge_obj = _call_compatible(
+                    self.lake.add_edge,
+                    source_id=node.node_id,
+                    target_id=edge_target,
+                    relation_type=edge_relation,
+                    source_agent_id=source_agent_id,
+                )
             self.status_message = f"Created concept '{canonical_name}'"
             return {
                 "status": "ok",
                 "action": "create",
                 "node": node.to_dict() if hasattr(node, "to_dict") else node,
+                "edge": edge_obj.to_dict() if (edge_obj and hasattr(edge_obj, "to_dict")) else edge_obj,
             }
 
         if action_key == "r":
@@ -683,6 +702,9 @@ class MemoryPalaceTUI:
             history: List[BeliefRevision] = []
             if hasattr(self.lake, "get_belief_history"):
                 history = list(self.lake.get_belief_history(identifier))
+            edges_list: List[RelationEdge] = []
+            if hasattr(self.lake, "list_edges"):
+                edges_list = list(self.lake.list_edges(node_id=identifier, active_only=True))
             self.status_message = f"Read concept '{identifier}' ({len(history)} revisions)"
             return {
                 "status": "ok",
@@ -690,6 +712,9 @@ class MemoryPalaceTUI:
                 "node": node.to_dict() if (node and hasattr(node, "to_dict")) else node,
                 "history": [
                     rev.to_dict() if hasattr(rev, "to_dict") else rev for rev in history
+                ],
+                "edges": [
+                    e.to_dict() if hasattr(e, "to_dict") else e for e in edges_list
                 ],
             }
 
@@ -704,6 +729,8 @@ class MemoryPalaceTUI:
             summary = payload.get("summary")
             pinned = payload.get("pinned")
             timestamp = payload.get("timestamp")
+            category = payload.get("category")
+            new_canonical_name = payload.get("new_canonical_name")
 
             update_kwargs: Dict[str, Any] = {
                 "node_id_or_name": identifier,
@@ -718,13 +745,29 @@ class MemoryPalaceTUI:
                 update_kwargs["pinned"] = bool(pinned)
             if timestamp is not None:
                 update_kwargs["timestamp"] = float(timestamp)
+            if category is not None:
+                update_kwargs["category"] = category
+            if new_canonical_name is not None:
+                update_kwargs["canonical_name"] = new_canonical_name
 
             updated = _call_compatible(self.lake.update_concept, **update_kwargs)
-            self.status_message = f"Updated concept '{identifier}'"
+            edge_target = (payload.get("edge_target") or "").strip()
+            edge_relation = (payload.get("edge_relation") or "related_to").strip() or "related_to"
+            edge_obj = None
+            if edge_target and hasattr(self.lake, "add_edge"):
+                edge_obj = _call_compatible(
+                    self.lake.add_edge,
+                    source_id=updated.node_id,
+                    target_id=edge_target,
+                    relation_type=edge_relation,
+                    source_agent_id=source_agent_id,
+                )
+            self.status_message = f"Updated concept '{updated.canonical_name}'"
             return {
                 "status": "ok",
                 "action": "update",
                 "node": updated.to_dict() if hasattr(updated, "to_dict") else updated,
+                "edge": edge_obj.to_dict() if (edge_obj and hasattr(edge_obj, "to_dict")) else edge_obj,
             }
 
         if action_key == "d":
@@ -848,6 +891,70 @@ class MemoryPalaceTUI:
                 "action": "time_travel",
                 "as_of": self.as_of,
                 "snapshot": snap,
+            }
+
+        if action_key in ("k", "theme"):
+            requested = payload.get("theme_mode")
+            if requested in ("dark", "light"):
+                self.theme_mode = str(requested)
+            else:
+                self.theme_mode = "light" if self.theme_mode == "dark" else "dark"
+            self.status_message = f"Theme switched to {self.theme_mode.upper()} mode"
+            return {
+                "status": "ok",
+                "action": "theme",
+                "theme_mode": self.theme_mode,
+            }
+
+        if action_key == "e":
+            sub = (payload.get("op") or "create").lower()
+            if sub == "delete":
+                edge_id = payload.get("edge_id") or ""
+                hard = bool(payload.get("hard", False))
+                deleted = _call_compatible(self.lake.delete_edge, edge_id, hard=hard) if hasattr(self.lake, "delete_edge") else False
+                self.status_message = f"Deleted edge '{edge_id}'"
+                return {"status": "ok", "action": "delete_edge", "deleted": bool(deleted), "edge_id": edge_id}
+            src = payload.get("source_id") or ""
+            tgt = payload.get("target_id") or ""
+            rel = payload.get("relation_type") or "related_to"
+            weight = float(payload.get("weight", 1.0))
+            edge = _call_compatible(self.lake.add_edge, source_id=src, target_id=tgt, relation_type=rel, weight=weight)
+            self.status_message = f"Added edge {src} -[{rel}]-> {tgt}"
+            return {
+                "status": "ok",
+                "action": "add_edge",
+                "edge": edge.to_dict() if hasattr(edge, "to_dict") else edge,
+            }
+
+        if action_key == "s":
+            sub = (payload.get("op") or "upsert").lower()
+            agent_id = (payload.get("agent_id") or "").strip()
+            if not agent_id:
+                raise ValueError("Missing 'agent_id' in payload for session action 's'.")
+            if sub == "delete":
+                deleted = _call_compatible(self.lake.delete_agent_session, agent_id) if hasattr(self.lake, "delete_agent_session") else False
+                if self.selected_agent_id == agent_id:
+                    self.selected_agent_id = None
+                self.status_message = f"Deleted agent session '{agent_id}'"
+                return {"status": "ok", "action": "delete_session", "deleted": bool(deleted), "agent_id": agent_id}
+            existing_sess = self.lake.get_agent_session(agent_id) if hasattr(self.lake, "get_agent_session") else None
+            sess = AgentSession(
+                agent_id=agent_id,
+                harness_type=str(payload.get("harness_type") or (existing_sess.harness_type if existing_sess else "antigravity")),
+                model_id=str(payload.get("model_id") or (existing_sess.model_id if existing_sess else "gemini-4-argon")),
+                max_context_tokens=int(payload.get("max_context_tokens") or (existing_sess.max_context_tokens if existing_sess else 1_000_000)),
+                used_tokens=int(payload.get("used_tokens") if payload.get("used_tokens") is not None else (existing_sess.used_tokens if existing_sess else 0)),
+                transcript_path=existing_sess.transcript_path if existing_sess else None,
+                last_processed_turn=existing_sess.last_processed_turn if existing_sess else 0,
+                last_byte_offset=existing_sess.last_byte_offset if existing_sess else 0,
+            )
+            saved = self.lake.upsert_agent_session(sess)
+            self.selected_agent_id = agent_id
+            self.status_message = f"Saved agent session '{agent_id}'"
+            return {
+                "status": "ok",
+                "action": "upsert_session",
+                "session": saved.to_dict() if hasattr(saved, "to_dict") else saved,
             }
 
         raise ValueError(f"Unsupported key action: {key!r}")

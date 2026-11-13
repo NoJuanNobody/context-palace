@@ -998,6 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tui.add_argument("--as-of", type=float, default=None, help="Time-travel unix timestamp")
     p_tui.add_argument("--search", type=str, default="", help="Filter concepts by query")
     p_tui.add_argument("--agent-id", type=str, default=None, help="Highlight selected agent")
+    p_tui.add_argument("--theme", choices=["dark", "light"], default="dark", help="Color theme mode (dark or light, default: dark)")
 
     # 2. scan-agents
     p_scan = subparsers.add_parser(
@@ -1152,6 +1153,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         as_of_val = getattr(args, "as_of", None)
         agent_id_val = getattr(args, "agent_id", None)
         search_val = getattr(args, "search", "")
+        theme_val = getattr(args, "theme", "dark") or "dark"
+        tui.theme_mode = theme_val
         if once_flag or not sys.stdin.isatty():
             out = tui.render_dashboard(
                 as_of=as_of_val,
@@ -1169,7 +1172,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             except ImportError:
                 run_textual_tui = None  # type: ignore[assignment]
             if run_textual_tui is not None:
-                run_textual_tui(tui, search_query=search_val or "")
+                run_textual_tui(tui, search_query=search_val or "", theme_mode=theme_val)
                 return 0
         tui.run_interactive()
         return 0
