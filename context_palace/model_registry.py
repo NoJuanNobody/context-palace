@@ -529,6 +529,17 @@ class ModelContextRegistry:
         session_meta["provider"] = spec.provider
         session_meta["raw_detected_model"] = detected_model
 
+        try:
+            from context_palace.summarizer import extract_transcript_summary
+
+            t_info = extract_transcript_summary(raw_text)
+            session_meta["topic_summary"] = t_info.get("topic_summary", "Active Coding Session")
+            session_meta["initial_topic_summary"] = t_info.get("initial_topic_summary", "")
+            session_meta["latest_prompt"] = t_info.get("latest_prompt", "")
+            session_meta["first_prompt"] = t_info.get("first_prompt", "")
+        except Exception:
+            pass
+
         return AgentSession(
             agent_id=agent_id,
             harness_type=harness_type,

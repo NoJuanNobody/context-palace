@@ -173,6 +173,8 @@ class GraphRow:
     is_root: bool = False
     value: str = ""
     canonical_name: str = ""
+    topic_summary: str = ""
+    plain_english: str = ""
 
 
 @dataclass
@@ -191,6 +193,7 @@ class DashboardData:
     conflicts: List[Any] = field(default_factory=list)
     node_provenance: Dict[str, str] = field(default_factory=dict)
     revision_provenance: Dict[str, str] = field(default_factory=dict)
+    revision_values: Dict[str, str] = field(default_factory=dict)
     revision_count: Optional[int] = None
     revision_timestamps: List[float] = field(default_factory=list)
     provenance_weights: Dict[str, float] = field(default_factory=dict)
@@ -408,6 +411,8 @@ def build_status_bar(data: DashboardData, width: Optional[int] = None) -> Table:
 # WINDOWS
 # ---------------------------------------------------------------------------
 def build_windows_pane(data: DashboardData) -> Group:
+    from context_palace.summarizer import get_session_topic_summary
+
     th = get_theme(data.theme_mode)
     table = Table(
         box=HAIRLINE_ROWS,
@@ -421,7 +426,7 @@ def build_windows_pane(data: DashboardData) -> Group:
         padding=(0, 1),
         style=th.s_ink,
     )
-    table.add_column("AGENT", no_wrap=True, overflow="ellipsis", ratio=3, min_width=10)
+    table.add_column("AGENT / TOPIC", no_wrap=True, overflow="ellipsis", ratio=3, min_width=14)
     table.add_column("HARNESS", no_wrap=True, overflow="ellipsis", ratio=2, style=th.s_60)
     table.add_column("MODEL", no_wrap=True, overflow="ellipsis", ratio=3, style=th.s_60)
     table.add_column("USED / MAX", no_wrap=True, ratio=4, min_width=20)
@@ -441,12 +446,17 @@ def build_windows_pane(data: DashboardData) -> Group:
         )
     for sess in data.sessions:
         aid = sess.agent_id
+        topic_3_5w, _ = get_session_topic_summary(sess)
+        name_base = th.s_strong if aid == data.selected_agent_id else th.s_ink
+        agent_line = Text(aid, style=_click(name_base, "manage_agent", aid))
+        topic_line = Text(f"↳ {topic_3_5w}", style=_click(th.s_60, "manage_agent", aid))
+        agent_cell: Any = Group(agent_line, topic_line)
+
         used = Text(f"{sess.used_tokens:,} / {sess.max_context_tokens:,}", style=_click(th.s_ink, "manage_agent", aid))
         bar = usage_bar(sess.used_tokens, sess.max_context_tokens, theme=th)
         bar.append(f"  {sess.utilization_pct:.2f}%", style=_click(th.s_ink, "manage_agent", aid))
-        name_base = th.s_strong if aid == data.selected_agent_id else th.s_ink
         table.add_row(
-            Text(aid, style=_click(name_base, "manage_agent", aid)),
+            agent_cell,
             Text(str(sess.harness_type), style=_click(th.s_60, "manage_agent", aid)),
             Text(str(sess.model_id), style=_click(th.s_60, "manage_agent", aid)),
             Group(used, bar),
@@ -471,6 +481,7 @@ def build_windows_pane(data: DashboardData) -> Group:
 # ---------------------------------------------------------------------------
 def build_lake_pane(data: DashboardData) -> Group:
     import os
+    from context_palace.summarizer import get_session_topic_summary, summarize_concept
 
     th = get_theme(data.theme_mode)
     lake_dir = _short_path(os.path.dirname(data.db_path)) if data.db_path not in ("", ":memory:") else ":memory:"
@@ -509,6 +520,43 @@ def build_lake_pane(data: DashboardData) -> Group:
         style=_click(th.s_45, "time_travel"),
     )
 
+    # Lake Concept Summaries table so the user immediately sees what concepts are in the Lake
+    concept_digest = Table(
+        box=HAIRLINE_ROWS,
+        show_header=True,
+        show_lines=False,
+        show_edge=False,
+        expand=True,
+        border_style=th.s_28,
+        header_style=th.s_label,
+        pad_edge=False,
+        padding=(0, 1),
+        style=th.s_ink,
+    )
+    concept_digest.add_column("LAKE TOPIC (3-5W)", no_wrap=True, overflow="ellipsis", ratio=4)
+    concept_digest.add_column("SUMMARY / ACTIVE BELIEF", no_wrap=True, overflow="ellipsis", ratio=6)
+    top_concepts = sorted(
+        active,
+        key=lambda n: (not bool(n.pinned), -float(n.confidence), -float(getattr(n, "updated_at", 0.0))),
+    )[:5]
+    if not top_concepts:
+        concept_digest.add_row(
+            Text("(0 active concepts)", style=_click(th.s_45, "create")),
+            Text("Click [+ New Concept] or press [m] Models to sync session topics", style=_click(th.s_45, "models")),
+        )
+    else:
+        for cn in top_concepts:
+            c_info = summarize_concept(
+                cn.canonical_name,
+                cn.active_value,
+                getattr(cn, "summary", ""),
+                cn.category,
+            )
+            concept_digest.add_row(
+                Text(c_info["short_topic"], style=_click(th.s_strong, "open_concept_crud", cn.canonical_name)),
+                Text(_clip(c_info["plain_english"], 48), style=_click(th.s_ink, "open_concept_crud", cn.canonical_name)),
+            )
+
     wm = Table(
         box=HAIRLINE_ROWS,
         show_header=True,
@@ -521,7 +569,7 @@ def build_lake_pane(data: DashboardData) -> Group:
         padding=(0, 1),
         style=th.s_ink,
     )
-    wm.add_column("SESSION", no_wrap=True, overflow="ellipsis")
+    wm.add_column("SESSION / TOPIC", no_wrap=True, overflow="ellipsis")
     wm.add_column("WATERMARK", no_wrap=True)
     wm.add_column("OFFSET", justify="right", no_wrap=True)
     wm.add_column("CAPSULE BUDGET", justify="right", no_wrap=True)
@@ -529,8 +577,13 @@ def build_lake_pane(data: DashboardData) -> Group:
         wm.add_row(Text("(none)", style=th.s_45), "-", "-", "-")
     for sess in data.sessions:
         aid = sess.agent_id
-        wm.add_row(
+        s_topic, _ = get_session_topic_summary(sess)
+        sess_cell = Group(
             Text(aid, style=_click(th.s_ink, "manage_agent", aid)),
+            Text(f"↳ {_clip(s_topic, 26)}", style=_click(th.s_60, "manage_agent", aid)),
+        )
+        wm.add_row(
+            sess_cell,
             Text(f"turn {sess.last_processed_turn}", style=_click(th.s_ink, "manage_agent", aid)),
             Text(f"{sess.last_byte_offset:,}", style=_click(th.s_ink, "manage_agent", aid)),
             Text(f"{sess.adaptive_capsule_budget():,} tok", style=_click(th.s_ink, "compact_agent", aid)),
@@ -553,6 +606,8 @@ def build_lake_pane(data: DashboardData) -> Group:
         tier_line,
         spark,
         rev_note,
+        concept_digest,
+        Text(""),
         wm,
         Text(""),
         prov,
@@ -565,6 +620,8 @@ def build_lake_pane(data: DashboardData) -> Group:
 def collect_graph_rows(
     data: DashboardData, max_roots: int = 8, max_children: int = 4, max_grandchildren: int = 2
 ) -> List[GraphRow]:
+    from context_palace.summarizer import summarize_concept
+
     nodes = data.nodes
     by_id = data.node_by_id
     out_edges: Dict[str, List[Any]] = {}
@@ -582,6 +639,12 @@ def collect_graph_rows(
     )[:max_roots]
 
     def node_row(node: Any, prefix: str, relation: str, is_root: bool) -> GraphRow:
+        c_info = summarize_concept(
+            node.canonical_name,
+            node.active_value,
+            getattr(node, "summary", ""),
+            node.category,
+        )
         return GraphRow(
             prefix=prefix,
             relation=relation,
@@ -591,8 +654,10 @@ def collect_graph_rows(
             pinned=bool(node.pinned),
             provenance=data.node_provenance.get(node.node_id, ""),
             is_root=is_root,
-            value=node.active_value if is_root else "",
+            value=node.active_value,
             canonical_name=node.canonical_name,
+            topic_summary=c_info["short_topic"],
+            plain_english=c_info["plain_english"],
         )
 
     rows: List[GraphRow] = []
@@ -604,6 +669,7 @@ def collect_graph_rows(
             target = by_id.get(edge.target_id)
             branch = "└─ " if last else "├─ "
             if target is None:
+                c_info = summarize_concept(edge.target_id)
                 rows.append(
                     GraphRow(
                         branch,
@@ -614,6 +680,8 @@ def collect_graph_rows(
                         False,
                         "",
                         canonical_name=edge.target_id,
+                        topic_summary=c_info["short_topic"],
+                        plain_english=c_info["plain_english"],
                     )
                 )
                 continue
@@ -625,6 +693,7 @@ def collect_graph_rows(
                 gtarget = by_id.get(gedge.target_id)
                 gbranch = ("   " if last else "│  ") + ("└─ " if gi == len(grand) - 1 else "├─ ")
                 if gtarget is None:
+                    c_info = summarize_concept(gedge.target_id)
                     rows.append(
                         GraphRow(
                             gbranch,
@@ -635,6 +704,8 @@ def collect_graph_rows(
                             False,
                             "",
                             canonical_name=gedge.target_id,
+                            topic_summary=c_info["short_topic"],
+                            plain_english=c_info["plain_english"],
                         )
                     )
                 else:
@@ -646,7 +717,7 @@ def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
     th = get_theme(data.theme_mode)
     rows = collect_graph_rows(data, max_roots=max_roots)
     table = Table.grid(expand=True, padding=(0, 1))
-    table.add_column(no_wrap=True, overflow="ellipsis", ratio=5)  # tree + name
+    table.add_column(no_wrap=True, overflow="ellipsis", ratio=6)  # tree + name + 3-5w topic
     table.add_column(no_wrap=True, overflow="ellipsis", ratio=2)  # category
     table.add_column(no_wrap=True)  # conf
     table.add_column(no_wrap=True, min_width=6)  # PINNED
@@ -668,6 +739,8 @@ def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
             name.append(f"{r.relation}  ", style=th.s_60)
         name_style = th.s_strong if r.is_root else th.s_ink
         name.append(r.name, style=_click(name_style, "open_concept_crud", cname))
+        if r.topic_summary:
+            name.append(f"  · {r.topic_summary}", style=_click(th.s_60, "open_concept_crud", cname))
 
         pin_cell = Text()
         if r.pinned:
@@ -693,9 +766,9 @@ def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
             pin_cell,
             prov_cell,
         )
-        if r.is_root and r.value and (r.pinned or data.search_query or data.as_of is not None):
+        if r.is_root and r.value:
             val_text = Text(
-                f"   = {r.value}",
+                f"   = {_clip(r.value, 96)}",
                 style=_click(th.s_45, "open_concept_crud", cname),
                 overflow="fold",
             )
@@ -736,15 +809,61 @@ def build_graph_pane(data: DashboardData, max_roots: int = 8) -> Group:
 # AUDIT
 # ---------------------------------------------------------------------------
 def build_audit_pane(data: DashboardData, max_events: int = 3, max_chat_turns: int = 2) -> Group:
+    from context_palace.summarizer import get_session_topic_summary, summarize_concept
+
     th = get_theme(data.theme_mode)
     by_id = data.node_by_id
     audit_hint = Text()
-    audit_hint.append("consensus · last capsule · ", style=th.s_45)
+    audit_hint.append("topics · consensus · capsule · ", style=th.s_45)
     audit_hint.append("[a] ask", style=_click(th.s_strong, "ask"))
     audit_hint.append(" · ", style=th.s_45)
     audit_hint.append("[p] inject", style=_click(th.s_ink, "pin_inject"))
 
     lines: List[RenderableType] = [pane_heading("Audit", audit_hint, theme=th, label_action="ask")]
+
+    # 1. Active Topics & Latest Belief Summaries (so you always see what topics are in Audit)
+    lines.append(Text("Active Topic Summaries (Latest Beliefs & Sessions)", style=th.s_ink))
+    active_nodes = [n for n in data.nodes if not getattr(n, "tombstoned", False)]
+    recent_nodes = sorted(
+        active_nodes,
+        key=lambda n: (-float(getattr(n, "updated_at", 0.0)), not bool(n.pinned), -float(n.confidence)),
+    )[:4]
+    if recent_nodes:
+        for rn in recent_nodes:
+            c_info = summarize_concept(
+                rn.canonical_name,
+                rn.active_value,
+                getattr(rn, "summary", ""),
+                rn.category,
+            )
+            row_t = Text("  • ")
+            row_t.append(
+                f"{c_info['short_topic']}",
+                style=_click(th.s_strong, "open_concept_crud", rn.canonical_name),
+            )
+            row_t.append(
+                f" ({rn.canonical_name}) — {_clip(c_info['plain_english'], 52)}",
+                style=_click(th.s_60, "open_concept_crud", rn.canonical_name),
+            )
+            lines.append(row_t)
+    elif data.sessions:
+        for sess in data.sessions[:3]:
+            s_topic, s_prev = get_session_topic_summary(sess)
+            row_t = Text("  • ")
+            row_t.append(
+                f"{s_topic}",
+                style=_click(th.s_strong, "manage_agent", sess.agent_id),
+            )
+            row_t.append(
+                f" ({sess.agent_id}) — {_clip(s_prev or sess.model_id, 52)}",
+                style=_click(th.s_60, "manage_agent", sess.agent_id),
+            )
+            lines.append(row_t)
+    else:
+        lines.append(Text("  (no active topics yet)", style=th.s_45))
+    lines.append(Text(""))
+
+    # 2. ConflictResolutionEvent with human-readable topic + winning/losing belief values
     lines.append(Text("ConflictResolutionEvent", style=th.s_ink))
     events = sorted(data.conflicts, key=lambda e: -float(getattr(e, "resolved_at", 0.0)))[:max_events]
     if not events:
@@ -752,10 +871,16 @@ def build_audit_pane(data: DashboardData, max_events: int = 3, max_chat_turns: i
     for ev in events:
         node = by_id.get(ev.node_id)
         cname = node.canonical_name if node else ev.node_id
+        c_info = (
+            summarize_concept(node.canonical_name, node.active_value, getattr(node, "summary", ""), node.category)
+            if node is not None
+            else summarize_concept(cname)
+        )
         head = Text()
         head.append(_clip(ev.event_id, 18), style=_click(th.s_ink, "open_concept_crud", cname))
         head.append("  ")
         head.append(cname, style=_click(th.s_strong, "open_concept_crud", cname))
+        head.append(f" · {c_info['short_topic']}", style=_click(th.s_ink, "open_concept_crud", cname))
         head.append("  [inspect]", style=_click(th.s_45, "open_concept_crud", cname))
         lines.append(head)
         for label, agent, score, rev_id in (
@@ -767,6 +892,9 @@ def build_audit_pane(data: DashboardData, max_events: int = 3, max_chat_turns: i
             t.append(f" {_clip(agent, 22):<22} ", style=_click(th.s_ink, "manage_agent", agent))
             t.append(f"{score:.3f}  ", style=th.s_ink)
             t.append(data.revision_provenance.get(rev_id, ""), style=th.s_60)
+            rev_val_str = data.revision_values.get(rev_id, "")
+            if rev_val_str:
+                t.append(f"  “{_clip(rev_val_str, 36)}”", style=th.s_45)
             lines.append(t)
         if ev.reason:
             t = Text("  ")

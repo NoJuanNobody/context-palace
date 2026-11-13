@@ -428,6 +428,7 @@ class MemoryPalaceTUI:
         # Provenance per node = provenance_type of its active (or latest as-of) revision.
         node_prov: Dict[str, str] = {}
         rev_prov: Dict[str, str] = {}
+        rev_val: Dict[str, str] = {}
         if hasattr(self.lake, "get_belief_history"):
             wanted = {n.node_id for n in nodes}
             wanted.update(c.node_id for c in conflicts)
@@ -438,6 +439,7 @@ class MemoryPalaceTUI:
                     continue
                 for rev in history:
                     rev_prov[rev.revision_id] = rev.provenance_type
+                    rev_val[rev.revision_id] = rev.value
                 visible = [
                     r
                     for r in history
@@ -470,6 +472,7 @@ class MemoryPalaceTUI:
             conflicts=conflicts,
             node_provenance=node_prov,
             revision_provenance=rev_prov,
+            revision_values=rev_val,
             revision_count=rev_count,
             revision_timestamps=rev_ts,
             provenance_weights=dict(PROVENANCE_WEIGHTS),
@@ -872,6 +875,12 @@ class MemoryPalaceTUI:
                 if hasattr(self.lake, "upsert_agent_session"):
                     for sess in discovered:
                         self.lake.upsert_agent_session(sess)
+                try:
+                    from context_palace.summarizer import sync_session_topics_to_lake
+
+                    sync_session_topics_to_lake(self.lake, discovered)
+                except Exception:
+                    pass
             else:
                 discovered = self._fetch_agent_sessions()
 

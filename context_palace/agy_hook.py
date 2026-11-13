@@ -193,6 +193,13 @@ def handle_agy_hook_payload(
                     extractor.ingest_turns(lake=lake, session=session, turns=turns_list)
 
             if not is_headless_subagent:
+                if "brain" in tp_parts:
+                    try:
+                        from context_palace.summarizer import sync_session_topics_to_lake
+
+                        sync_session_topics_to_lake(lake, [session])
+                    except Exception:
+                        pass
                 lake.upsert_agent_session(session)
             elif hasattr(lake, "delete_agent_session"):
                 lake.delete_agent_session(session.agent_id)

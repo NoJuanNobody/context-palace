@@ -467,3 +467,22 @@ def test_status_bar_lists_chat_and_list_all_keys(demo: dict) -> None:
     out = demo["tui"].render_dashboard(width=200)
     for key in ("c", "r", "u", "d", "l", "a", "p", "m", "t", "q"):
         assert f"[{key}]" in out
+
+
+def test_topic_and_concept_summaries_in_all_four_panes(demo: dict) -> None:
+    from context_palace.summarizer import summarize_3_to_5_words, summarize_concept
+
+    s_topic = summarize_3_to_5_words("i want the functionality of terminal for one click install")
+    assert 3 <= len(s_topic.split()) <= 5
+    assert "Terminal" in s_topic and "Install" in s_topic
+
+    c_info = summarize_concept("auth_strategy", "Use Ed25519 + WebAuthn passkeys", category="architecture")
+    assert "Ed25519" in c_info["short_topic"]
+    assert "WebAuthn" in c_info["plain_english"]
+
+    out = demo["tui"].render_dashboard(width=200)
+    assert "AGENT / TOPIC" in out
+    assert "LAKE TOPIC" in out
+    assert "Active Topic Summaries" in out
+    assert "Ed25519" in out
+
